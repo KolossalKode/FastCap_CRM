@@ -1,0 +1,145 @@
+// This is your Prisma schema file.
+// It defines your database models and relations.
+// Make sure your DATABASE_URL in the .env file points to your PostgreSQL database.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL") // Loads from .env file
+}
+
+// User model (basic structure for now)
+model User {
+  id        String   @id // Removed @default
+  email     String   @unique
+  name      String?
+  role      String   @default("Rep")
+  password  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ownedContacts Contact[] @relation("ContactOwner")
+  notes         Note[]    @relation("NoteAuthor")
+}
+
+// Contact model with added fields
+model Contact {
+  id              String   @id // Removed @default
+  firstName       String
+  lastName        String
+  email           String   @unique
+  phone           String?
+  mobilePhone     String?
+  officePhone     String?
+  otherPhone      String?
+  company         String?
+  tags            String[] @default([])
+  lead_status     String?  @default("New")
+  contactType     String?  @default("Primary")
+  businessAddress String?
+  businessCity    String?
+  businessZip     String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  ownerId String?
+  owner   User?    @relation("ContactOwner", fields: [ownerId], references: [id])
+
+  notes Note[] @relation("ContactNotes")
+  deals Deal[] @relation("DealContacts")
+
+  @@index([ownerId])
+  @@index([email])
+  @@index([lead_status])
+}
+
+// Note model (related to Contact and User)
+model Note {
+  id        String   @id // Removed @default
+  content   String
+  timestamp DateTime @default(now())
+
+  authorId String
+  author   User   @relation("NoteAuthor", fields: [authorId], references: [id])
+
+  contactId String?
+  contact   Contact? @relation("ContactNotes", fields: [contactId], references: [id])
+
+  dealId String?
+  deal   Deal?   @relation("DealNotes", fields: [dealId], references: [id])
+
+  taskId String?
+  task   Task?   @relation("TaskNotes", fields: [taskId], references: [id])
+
+
+  @@index([authorId])
+  @@index([contactId])
+  @@index([dealId])
+  @@index([taskId])
+}
+
+// Example Deal structure (Needs expansion based on frontend)
+model Deal {
+  id                String    @id // Removed @default
+  name              String
+  value             Float?
+  stage             String
+  expectedCloseDate DateTime?
+  dealType          String?
+  priority          String?
+  nextStep          String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  ownerId String?
+  // owner User? @relation(...)
+
+  contacts Contact[] @relation("DealContacts")
+
+  notes       Note[]       @relation("DealNotes")
+  submissions Submission[] @relation("DealSubmissions")
+
+  // @@index([ownerId])
+  @@index([stage])
+}
+
+// Example Task structure (Needs expansion)
+model Task {
+  id         String   @id // Removed @default
+  title      String
+  dueDate    DateTime?
+  assignedTo String?
+  status     String   @default("Pending")
+  relatedTo  String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  notes Note[] @relation("TaskNotes")
+  // TODO: Add relation to User if needed for assignedTo
+}
+
+// Example Submission structure (Needs expansion)
+model Submission {
+  id              String    @id // Removed @default
+  lender_name     String
+  submission_date DateTime?
+  status          String    @default("Submitted")
+  approval_date   DateTime?
+  approval_amount Float?
+  approval_term   String?
+  approval_rate   Float?
+  stipulations    String?
+  approval_link   String?
+  decline_reason  String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  dealId String
+  deal   Deal   @relation("DealSubmissions", fields: [dealId], references: [id])
+
+  @@index([dealId])
+  @@index([status])
+}
