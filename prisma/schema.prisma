@@ -1,19 +1,17 @@
-// This is your Prisma schema file.
-// It defines your database models and relations.
-// Make sure your DATABASE_URL in the .env file points to your PostgreSQL database.
+// prisma/schema.prisma
 
 generator client {
   provider = "prisma-client-js"
+  // output   = "../node_modules/@prisma/client" // Optional: for future Prisma versions
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL") // Loads from .env file
+  url      = env("DATABASE_URL")
 }
 
-// User model (basic structure for now)
 model User {
-  id        String   @id // Removed @default
+  id        String   @id // App-level UUID generation
   email     String   @unique
   name      String?
   role      String   @default("Rep")
@@ -23,11 +21,13 @@ model User {
 
   ownedContacts Contact[] @relation("ContactOwner")
   notes         Note[]    @relation("NoteAuthor")
+  assignedTasks Task[]    @relation("TaskAssignee") // Relation for tasks assigned to this user
+
+  @@map("User")
 }
 
-// Contact model with added fields
 model Contact {
-  id              String   @id // Removed @default
+  id              String   @id // App-level UUID generation
   firstName       String
   lastName        String
   email           String   @unique
@@ -50,15 +50,16 @@ model Contact {
 
   notes Note[] @relation("ContactNotes")
   deals Deal[] @relation("DealContacts")
+  tasks Task[] @relation("TaskContact") // Tasks related to this contact
 
   @@index([ownerId])
   @@index([email])
   @@index([lead_status])
+  @@map("Contact")
 }
 
-// Note model (related to Contact and User)
 model Note {
-  id        String   @id // Removed @default
+  id        String   @id // App-level UUID generation
   content   String
   timestamp DateTime @default(now())
 
@@ -71,19 +72,18 @@ model Note {
   dealId String?
   deal   Deal?   @relation("DealNotes", fields: [dealId], references: [id])
 
-  taskId String?
-  task   Task?   @relation("TaskNotes", fields: [taskId], references: [id])
-
+  taskId String? // Foreign key for Task
+  task   Task?   @relation("TaskNotes", fields: [taskId], references: [id]) // Relation to Task
 
   @@index([authorId])
   @@index([contactId])
   @@index([dealId])
-  @@index([taskId])
+  @@index([taskId]) // Add index for taskId
+  @@map("Note")
 }
 
-// Example Deal structure (Needs expansion based on frontend)
 model Deal {
-  id                String    @id // Removed @default
+  id                String    @id // App-level UUID generation
   name              String
   value             Float?
   stage             String
@@ -95,35 +95,54 @@ model Deal {
   updatedAt         DateTime  @updatedAt
 
   ownerId String?
-  // owner User? @relation(...)
+  // owner User? @relation(...) // TODO: Implement owner relation for Deals
 
   contacts Contact[] @relation("DealContacts")
 
   notes       Note[]       @relation("DealNotes")
   submissions Submission[] @relation("DealSubmissions")
+  tasks       Task[]       @relation("TaskDeal") // Tasks related to this deal
 
   // @@index([ownerId])
   @@index([stage])
+  @@map("Deal")
 }
 
-// Example Task structure (Needs expansion)
 model Task {
-  id         String   @id // Removed @default
+  id         String    @id // App-level UUID generation
   title      String
+  description String?   // Optional longer description for the task
   dueDate    DateTime?
-  assignedTo String?
-  status     String   @default("Pending")
-  relatedTo  String?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  status     String    @default("Pending") // e.g., Pending, In Progress, Completed, Deferred
+  priority   String?   // e.g., High, Medium, Low
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
 
-  notes Note[] @relation("TaskNotes")
-  // TODO: Add relation to User if needed for assignedTo
+  // Relation to User (who is this task assigned to?)
+  assignedToId String?   // Foreign key for User
+  assignedUser User?     @relation("TaskAssignee", fields: [assignedToId], references: [id])
+
+  // Relation to Contact (optional)
+  contactId  String?
+  contact    Contact?  @relation("TaskContact", fields: [contactId], references: [id])
+
+  // Relation to Deal (optional)
+  dealId     String?
+  deal       Deal?     @relation("TaskDeal", fields: [dealId], references: [id])
+
+  // Inverse relation for Notes
+  notes      Note[]    @relation("TaskNotes")
+
+  @@index([assignedToId])
+  @@index([contactId])
+  @@index([dealId])
+  @@index([status])
+  @@index([priority])
+  @@map("Task")
 }
 
-// Example Submission structure (Needs expansion)
 model Submission {
-  id              String    @id // Removed @default
+  id              String    @id // App-level UUID generation
   lender_name     String
   submission_date DateTime?
   status          String    @default("Submitted")
@@ -142,4 +161,5 @@ model Submission {
 
   @@index([dealId])
   @@index([status])
+  @@map("Submission")
 }
