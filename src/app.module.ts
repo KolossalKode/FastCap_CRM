@@ -9,6 +9,7 @@ import { DealsModule } from './deals/deals.module';
 import { NotesModule } from './notes/notes.module';
 import { AuthModule } from './auth.module';
 import { TasksModule } from './tasks/tasks.module'; // <-- Import TasksModule
+import { SubmissionsModule } from './submissions/submissions.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { TasksModule } from './tasks/tasks.module'; // <-- Import TasksModule
       NotesModule,
       AuthModule,
       TasksModule, // <-- Add TasksModule here
+      SubmissionsModule,
   ],
   controllers: [
       AppController
