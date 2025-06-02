@@ -274,6 +274,51 @@ const ContactsPage = ({ userRole, contacts, setContacts, allDealsFlat, allUsers 
     const [modalNotesError, setModalNotesError] = useState(null);
     const [noteSubmissionLoading, setNoteSubmissionLoading] = useState(false);
 
+    // State for editing a specific note
+    const [editingNoteId, setEditingNoteId] = useState(null);
+    const [editingNoteContent, setEditingNoteContent] = useState('');
+    const [noteUpdateLoading, setNoteUpdateLoading] = useState(null); // Stores ID of note being updated
+    const [noteUpdateError, setNoteUpdateError] = useState(null); // { id: string, message: string }
+    const [deletingNoteId, setDeletingNoteId] = useState(null); // Stores ID of note being deleted
+
+    const handleSaveEditedNote = async (noteId) => {
+        setNoteUpdateLoading(noteId);
+        setNoteUpdateError(null);
+        try {
+            const response = await axios.patch(`/notes/${noteId}`, { content: editingNoteContent });
+            setFormData(prevFormData => ({
+                ...prevFormData,
+                notes: prevFormData.notes.map(n => n.id === noteId ? response.data : n)
+            }));
+            setEditingNoteId(null);
+            setEditingNoteContent('');
+            // If a new note was added while another was in edit mode, ensure edit mode is cleared.
+        } catch (err) {
+            console.error("Failed to update note:", err);
+            setNoteUpdateError({ id: noteId, message: getAxiosErrorMessage(err) });
+        } finally {
+            setNoteUpdateLoading(null);
+        }
+    };
+
+    const handleDeleteNote = async (noteId) => {
+        if (window.confirm("Are you sure you want to delete this note?")) {
+            setDeletingNoteId(noteId);
+            setNoteUpdateError(null); // Clear previous errors
+            try {
+                await axios.delete(`/notes/${noteId}`);
+                setFormData(prevFormData => ({
+                    ...prevFormData,
+                    notes: prevFormData.notes.filter(n => n.id !== noteId)
+                }));
+            } catch (err) {
+                console.error("Failed to delete note:", err);
+                setNoteUpdateError({ id: noteId, message: getAxiosErrorMessage(err) });
+            } finally {
+                setDeletingNoteId(null);
+            }
+        }
+    };
 
     const canManage = userRole === 'Admin' || userRole === 'Owner';
     const availableOwners = useMemo(() => (allUsers || []).filter(u => u.role === 'Admin' || u.role === 'Rep' || u.role === 'Owner'), [allUsers]);
@@ -306,6 +351,7 @@ const ContactsPage = ({ userRole, contacts, setContacts, allDealsFlat, allUsers 
         if (!newNote.trim() || !editingContact) return;
         setModalNotesError(null);
         setNoteSubmissionLoading(true);
+        setNoteUpdateError(null); // Clear any previous note update errors
         try {
             const response = await axios.post('/notes', { content: newNote, contactId: editingContact.id });
             const newNoteData = response.data;
@@ -314,6 +360,8 @@ const ContactsPage = ({ userRole, contacts, setContacts, allDealsFlat, allUsers 
                 notes: [...(prevFormData.notes || []), newNoteData]
             }));
             setNewNote('');
+            setEditingNoteId(null); // Ensure we are not in edit mode for any note after adding a new one
+            setEditingNoteContent('');
         } catch (err) {
             console.error("Failed to add note:", err);
             setModalNotesError(getAxiosErrorMessage(err));
@@ -322,15 +370,20 @@ const ContactsPage = ({ userRole, contacts, setContacts, allDealsFlat, allUsers 
         }
     };
 
-    const openAddContactModal = async (contact = null) => { 
+    const openAddContactModal = async (contact = null) => {
         setModalError(null); 
         setContactsActionError(null);
         setModalNotesError(null);
+        setEditingNoteId(null); 
+        setEditingNoteContent('');
+        setNoteUpdateError(null);
+        setNoteUpdateLoading(null); 
+        setDeletingNoteId(null); // Reset deleting note ID
+        setNoteSubmissionLoading(false);
         setNewNote('');
 
         if (contact) { // Editing existing contact
             setEditingContact(contact);
-            // Initialize with basic contact data; notes will be fetched
             setFormData({
                 ...contact,
                 firstName: contact.firstName || '', lastName: contact.lastName || '', 
@@ -341,7 +394,7 @@ const ContactsPage = ({ userRole, contacts, setContacts, allDealsFlat, allUsers 
                 businessCity: contact.businessCity || '', businessZip: contact.businessZip || '',
                 notes: [], // Initialize as empty, then fetch
             });
-            setIsAddContactModalOpen(true); // Open modal first
+            setIsAddContactModalOpen(true); 
 
             setModalNotesLoading(true);
             try {
@@ -350,7 +403,8 @@ const ContactsPage = ({ userRole, contacts, setContacts, allDealsFlat, allUsers 
             } catch (err) {
                 console.error("Failed to fetch notes for contact:", err);
                 setModalNotesError(getAxiosErrorMessage(err));
-                setFormData(prevFormData => ({ ...prevFormData, notes: contact.notes || [] })); // Fallback to original notes if fetch fails
+                // Fallback to notes potentially passed with the contact object if API fails for notes
+                setFormData(prevFormData => ({ ...prevFormData, notes: contact.notes || [] })); 
             } finally {
                 setModalNotesLoading(false);
             }
@@ -364,7 +418,18 @@ const ContactsPage = ({ userRole, contacts, setContacts, allDealsFlat, allUsers 
             setIsAddContactModalOpen(true); 
         }
     };
-    const closeAddContactModal = () => { setIsAddContactModalOpen(false); setEditingContact(null); setAssociatedDeals([]); setModalError(null); setModalNotesError(null);}; 
+    const closeAddContactModal = () => { 
+        setIsAddContactModalOpen(false); 
+        setEditingContact(null); 
+        setAssociatedDeals([]); 
+        setModalError(null); 
+        setModalNotesError(null);
+        setEditingNoteId(null);
+        setEditingNoteContent('');
+        setNoteUpdateError(null);
+        setNoteUpdateLoading(null); 
+        setDeletingNoteId(null); // Reset deleting note ID on close
+    }; 
 
     const openImportModal = () => setIsImportModalOpen(true);
     const closeImportModal = () => setIsImportModalOpen(false);
@@ -374,7 +439,6 @@ const ContactsPage = ({ userRole, contacts, setContacts, allDealsFlat, allUsers 
         setModalIsLoading(true);
         setModalError(null);
         setContactsActionError(null);
-
 
         let ownerIdToSend = formData.ownerId;
         if (ownerIdToSend === '') {
@@ -398,15 +462,13 @@ const ContactsPage = ({ userRole, contacts, setContacts, allDealsFlat, allUsers 
             businessCity: formData.businessCity || null,
             businessZip: formData.businessZip || null,
         };
-        // Notes are NOT sent with contact create/update anymore. They are managed separately.
         
         if (editingContact) {
             try {
                 const response = await axios.patch(`/contacts/${editingContact.id}`, contactPayload);
-                // Update contact in list, but keep existing notes from formData if they were successfully fetched/updated
-                // as PATCH /contacts/:id might not return notes.
-                const updatedContact = { ...response.data, notes: formData.notes };
-                setContacts(prev => prev.map(c => c.id === editingContact.id ? updatedContact : c));
+                // The notes are now managed by formData.notes which are fetched/updated independently
+                const updatedContactData = { ...response.data, notes: formData.notes };
+                setContacts(prev => prev.map(c => c.id === editingContact.id ? updatedContactData : c));
                 closeAddContactModal();
             } catch (err) {
                 console.error("Failed to update contact:", err);
@@ -418,7 +480,7 @@ const ContactsPage = ({ userRole, contacts, setContacts, allDealsFlat, allUsers 
             // Create new contact
             try {
                 const response = await axios.post('/contacts', contactPayload);
-                setContacts(prevContacts => [...prevContacts, response.data]); // New contact won't have notes from this response
+                setContacts(prevContacts => [...prevContacts, response.data]); 
                 closeAddContactModal();
             } catch (err) {
                 console.error("Failed to create contact:", err);
@@ -446,6 +508,32 @@ const ContactsPage = ({ userRole, contacts, setContacts, allDealsFlat, allUsers 
             }
         }
     };
+
+    // --- Note Editing Specific Handlers ---
+    const [editingNoteId, setEditingNoteId] = useState(null);
+    const [editingNoteContent, setEditingNoteContent] = useState('');
+    const [noteUpdateLoading, setNoteUpdateLoading] = useState(null); // Store note ID
+    const [noteUpdateError, setNoteUpdateError] = useState(null); // {id, message}
+
+    const handleSaveEditedNote = async (noteId) => {
+        setNoteUpdateLoading(noteId);
+        setNoteUpdateError(null);
+        try {
+            const response = await axios.patch(`/notes/${noteId}`, { content: editingNoteContent });
+            setFormData(prevFormData => ({
+                ...prevFormData,
+                notes: prevFormData.notes.map(n => n.id === noteId ? response.data : n)
+            }));
+            setEditingNoteId(null);
+            setEditingNoteContent('');
+        } catch (err) {
+            console.error("Failed to update note:", err);
+            setNoteUpdateError({ id: noteId, message: getAxiosErrorMessage(err) });
+        } finally {
+            setNoteUpdateLoading(null);
+        }
+    };
+
 
     const filteredContacts = useMemo(() => { 
         const lowerCaseSearchTerm = searchTerm.toLowerCase(); 
@@ -549,30 +637,77 @@ const ContactsPage = ({ userRole, contacts, setContacts, allDealsFlat, allUsers 
                      {editingContact && ( 
                         <div className="mt-6 pt-4 border-t"> 
                             <h3 className="text-lg font-medium mb-3">Notes</h3> 
-                            {modalNotesError && <p className="text-red-500 text-sm mb-2">{modalNotesError}</p>}
+                            {modalNotesError && <p className="text-red-500 text-sm mb-2 bg-red-100 p-2 rounded-md">{modalNotesError}</p>}
                             {modalNotesLoading ? <p className="text-sm text-gray-500">Loading notes...</p> : (
                                 <>
-                                    <div className="space-y-3 mb-4 max-h-48 overflow-y-auto pr-1"> 
-                                        {(formData.notes || []).length === 0 && <p className="text-sm text-gray-500">No notes yet.</p>} 
-                                        {(formData.notes || []).slice().reverse().map(note => ( 
-                                            <div key={note.id} className="text-sm p-2 border rounded-md bg-gray-50"> 
-                                                <p className="whitespace-pre-wrap">{note.content}</p> 
-                                                <p className="text-xs text-gray-500 mt-1"> {note.author || 'System'} - {formatTimestamp(note.timestamp)} </p> 
-                                            </div> 
-                                        ))} 
-                                    </div> 
-                                    <div> 
-                                        <Label htmlFor="newNote">Add a Note</Label> 
-                                        <Textarea id="newNote" name="newNote" rows="3" value={newNote} onChange={handleNoteChange} placeholder="Type your note here..." /> 
-                                        <Button 
-                                            type="button" variant="secondary" size="sm" className="mt-2" 
-                                            onClick={handleAddNote} 
-                                            disabled={!newNote.trim() || !canManage || noteSubmissionLoading} 
-                                            title={!canManage ? "Admin or Owner role required" : ""}
-                                        > 
-                                            {noteSubmissionLoading ? "Adding..." : "Add Note"}
-                                        </Button> 
+                                    <div className="space-y-3 mb-4 max-h-48 overflow-y-auto pr-1">
+                                        {(formData.notes || []).length === 0 && !editingNoteId && <p className="text-sm text-gray-500">No notes yet.</p>}
+                                        {(formData.notes || []).slice().reverse().map(note => (
+                                            <div key={note.id} className="text-sm p-2 border rounded-md bg-gray-50">
+                                                {editingNoteId === note.id ? (
+                                                    <>
+                                                        <Textarea value={editingNoteContent} onChange={(e) => setEditingNoteContent(e.target.value)} rows="3" className="mb-2" />
+                                                        {noteUpdateError && noteUpdateError.id === note.id && <p className="text-red-500 text-xs mt-1">{noteUpdateError.message}</p>}
+                                                        <div className="mt-2 space-x-2">
+                                                            <Button size="sm" onClick={() => handleSaveEditedNote(note.id)} disabled={noteUpdateLoading === note.id}>
+                                                                {noteUpdateLoading === note.id ? "Saving..." : "Save Note"}
+                                                            </Button>
+                                                            <Button size="sm" variant="secondary" onClick={() => { setEditingNoteId(null); setEditingNoteContent(''); setNoteUpdateError(null); }} disabled={noteUpdateLoading === note.id}>
+                                                                Cancel
+                                                            </Button>
+                                                        </div>
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <p className="whitespace-pre-wrap">{note.content}</p>
+                                                        <p className="text-xs text-gray-500 mt-1"> {note.author || 'System'} - {formatTimestamp(note.timestamp)} </p>
+                                                        {/* Display update error for non-editing notes if it occurred and we are not currently editing THIS note */}
+                                                        {noteUpdateError && noteUpdateError.id === note.id && editingNoteId !== note.id && <p className="text-red-500 text-xs mt-1">{noteUpdateError.message}</p>}
+                                                        {canManage && (
+                                                            <div className="mt-2 space-x-2">
+                                                                <Button 
+                                                                    variant="outline" 
+                                                                    size="sm" 
+                                                                    onClick={() => { 
+                                                                        setEditingNoteId(note.id); 
+                                                                        setEditingNoteContent(note.content); 
+                                                                        setNoteUpdateError(null); // Clear general note update error or error from other notes
+                                                                    }} 
+                                                                    disabled={noteUpdateLoading === note.id || deletingNoteId === note.id || (editingNoteId !== null && editingNoteId !== note.id) || noteSubmissionLoading}
+                                                                    title={editingNoteId !== null && editingNoteId !== note.id ? "Another note is being edited" : (noteUpdateLoading === note.id ? "Loading..." : "Edit Note")}
+                                                                >
+                                                                    {noteUpdateLoading === note.id ? "..." : "Edit"}
+                                                                </Button>
+                                                                <Button 
+                                                                    variant="destructive" 
+                                                                    size="sm" 
+                                                                    onClick={() => handleDeleteNote(note.id)}
+                                                                    disabled={noteUpdateLoading === note.id || editingNoteId !== null || deletingNoteId === note.id || noteSubmissionLoading}
+                                                                    title={editingNoteId !== null ? "Finish other note actions first" : (deletingNoteId === note.id ? "Deleting..." : "Delete Note")}
+                                                                >
+                                                                    {deletingNoteId === note.id ? "..." : <TrashIcon />}
+                                                                </Button>
+                                                            </div>
+                                                        )}
+                                                    </>
+                                                )}
+                                            </div>
+                                        ))}
                                     </div>
+                                    {canManage && (
+                                        <div>
+                                            <Label htmlFor="newNote">Add a Note</Label>
+                                            <Textarea id="newNote" name="newNote" rows="3" value={newNote} onChange={handleNoteChange} placeholder="Type your note here..." disabled={editingNoteId !== null || noteSubmissionLoading} />
+                                            <Button
+                                                type="button" variant="secondary" size="sm" className="mt-2"
+                                                onClick={handleAddNote}
+                                                disabled={!newNote.trim() || !canManage || noteSubmissionLoading || editingNoteId !== null}
+                                                title={!canManage ? "Admin or Owner role required" : (editingNoteId !== null ? "Save or cancel current note edit first" : (noteSubmissionLoading ? "Adding..." : "Add Note"))}
+                                            >
+                                                {noteSubmissionLoading ? "Adding..." : "Add Note"}
+                                            </Button>
+                                        </div>
+                                    )}
                                 </>
                             )}
                         </div> 
@@ -691,6 +826,67 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
     // State for Deal Search Term
     const [dealSearchTerm, setDealSearchTerm] = useState('');
 
+    // State for Deal Notes in Modal
+    const [dealNotes, setDealNotes] = useState([]);
+    const [modalDealNotesLoading, setModalDealNotesLoading] = useState(false);
+    const [modalDealNotesError, setModalDealNotesError] = useState(null);
+    const [editingDealNoteId, setEditingDealNoteId] = useState(null);
+    const [editingDealNoteContent, setEditingDealNoteContent] = useState('');
+    const [dealNoteUpdateLoading, setDealNoteUpdateLoading] = useState(null); // Specific note ID
+    const [dealNoteUpdateError, setDealNoteUpdateError] = useState(null); // {id, message}
+    const [deletingDealNoteId, setDeletingDealNoteId] = useState(null);
+    const [dealNoteSubmissionLoading, setDealNoteSubmissionLoading] = useState(false);
+    const [newDealNote, setNewDealNote] = useState('');
+
+    // Internal Handlers for Deal Notes (to be passed to DealDetailModal)
+    const handleAddDealNoteInternal = async (dealId) => {
+        if (!newDealNote.trim() || !dealId) return;
+        setDealNoteSubmissionLoading(true);
+        setDealNoteUpdateError(null);
+        try {
+            const response = await axios.post('/notes', { content: newDealNote, dealId: dealId });
+            setDealNotes(prevNotes => [...prevNotes, response.data]);
+            setNewDealNote('');
+        } catch (err) {
+            console.error("Failed to add deal note:", err);
+            setModalDealNotesError(getAxiosErrorMessage(err)); // Use general modal error for add
+        } finally {
+            setDealNoteSubmissionLoading(false);
+        }
+    };
+
+    const handleSaveEditedDealNoteInternal = async (noteId) => {
+        setDealNoteUpdateLoading(noteId);
+        setDealNoteUpdateError(null);
+        try {
+            const response = await axios.patch(`/notes/${noteId}`, { content: editingDealNoteContent });
+            setDealNotes(prevNotes => prevNotes.map(n => n.id === noteId ? response.data : n));
+            setEditingDealNoteId(null);
+            setEditingDealNoteContent('');
+        } catch (err) {
+            console.error("Failed to update deal note:", err);
+            setDealNoteUpdateError({ id: noteId, message: getAxiosErrorMessage(err) });
+        } finally {
+            setDealNoteUpdateLoading(null);
+        }
+    };
+
+    const handleDeleteDealNoteInternal = async (noteId) => {
+        if (window.confirm("Are you sure you want to delete this note?")) {
+            setDeletingDealNoteId(noteId);
+            setDealNoteUpdateError(null);
+            try {
+                await axios.delete(`/notes/${noteId}`);
+                setDealNotes(prevNotes => prevNotes.filter(n => n.id !== noteId));
+            } catch (err) {
+                console.error("Failed to delete deal note:", err);
+                setDealNoteUpdateError({ id: noteId, message: getAxiosErrorMessage(err) });
+            } finally {
+                setDeletingDealNoteId(null);
+            }
+        }
+    };
+
 
     // --- Add Deal Modal Functions ---
     const openAddDealModal = () => { setNewDealData({ name: '', value: '', stage: DEAL_STAGES[0], contactIds: availableContacts.length > 0 ? [availableContacts[0].id] : [] }); setIsAddDealModalOpen(true); };
@@ -709,10 +905,23 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
     };
 
     // --- Deal Detail Modal Functions ---
-    // Updated to accept dealId and find the deal from the deals prop
+    const fetchDealNotes = async (dealId) => {
+        setModalDealNotesLoading(true);
+        setModalDealNotesError(null);
+        try {
+            const response = await axios.get(`/notes?dealId=${dealId}`);
+            setDealNotes(response.data || []);
+        } catch (err) {
+            console.error("Failed to fetch deal notes:", err);
+            setModalDealNotesError(getAxiosErrorMessage(err));
+            setDealNotes([]); // Fallback to empty array on error
+        } finally {
+            setModalDealNotesLoading(false);
+        }
+    };
+
     const openDetailModal = (dealId) => {
         let foundDeal = null;
-        // Iterate through the deals object passed as prop
         for (const stage in deals) {
             const deal = deals[stage].find(d => d.id === dealId);
             if (deal) {
@@ -722,21 +931,46 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
         }
 
         if (foundDeal) {
-             // Ensure notes, submissions, contactIds are initialized if missing
-             setSelectedDeal({
+            setSelectedDeal({ // Keep existing selected deal logic
                 ...foundDeal,
-                notes: foundDeal.notes || [],
+                // notes are now handled by dealNotes state, fetched below
                 submissions: foundDeal.submissions || [],
                 contactIds: foundDeal.contactIds || []
-             });
-             setIsDetailModalOpen(true);
+            });
+            
+            // Reset all note states before opening/fetching
+            setDealNotes([]); // Clear previous notes
+            setModalDealNotesLoading(true); // Set loading true before fetch
+            setModalDealNotesError(null);
+            setEditingDealNoteId(null);
+            setEditingDealNoteContent('');
+            setDealNoteUpdateLoading(null);
+            setDealNoteUpdateError(null);
+            setDeletingDealNoteId(null);
+            setDealNoteSubmissionLoading(false);
+            setNewDealNote('');
+
+            fetchDealNotes(foundDeal.id); // Fetch notes for this deal
+            setIsDetailModalOpen(true);
         } else {
             console.error("Deal not found for ID:", dealId);
         }
     };
+
     const closeDetailModal = () => {
         setIsDetailModalOpen(false);
         setSelectedDeal(null);
+        // Reset note states on close
+        setDealNotes([]);
+        setModalDealNotesLoading(false);
+        setModalDealNotesError(null);
+        setEditingDealNoteId(null);
+        setEditingDealNoteContent('');
+        setDealNoteUpdateLoading(null);
+        setDealNoteUpdateError(null);
+        setDeletingDealNoteId(null);
+        setDealNoteSubmissionLoading(false);
+        setNewDealNote('');
     };
 
    // --- Approval Entry Modal Functions ---
@@ -840,15 +1074,32 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
             <DealDetailModal
                 isOpen={isDetailModalOpen}
                 onClose={closeDetailModal}
-                deal={selectedDeal}
+                deal={selectedDeal} // Keep deal for main deal data
                 availableContacts={availableContacts}
                 userRole={userRole}
-                onAddNote={handleAddDealNote} // Pass App-level handler
-                onAddSubmission={handleAddDealSubmission} // Pass App-level handler
+                // Note-specific props from DealsPage:
+                dealNotes={dealNotes}
+                modalDealNotesLoading={modalDealNotesLoading}
+                modalDealNotesError={modalDealNotesError}
+                editingDealNoteId={editingDealNoteId}
+                setEditingDealNoteId={setEditingDealNoteId}
+                editingDealNoteContent={editingDealNoteContent}
+                setEditingDealNoteContent={setEditingDealNoteContent}
+                dealNoteUpdateLoading={dealNoteUpdateLoading}
+                dealNoteUpdateError={dealNoteUpdateError}
+                deletingDealNoteId={deletingDealNoteId}
+                dealNoteSubmissionLoading={dealNoteSubmissionLoading}
+                newDealNote={newDealNote}
+                setNewDealNote={setNewDealNote}
+                onAddDealNote={handleAddDealNoteInternal}
+                onSaveEditedDealNote={handleSaveEditedDealNoteInternal}
+                onDeleteDealNote={handleDeleteDealNoteInternal}
+                // Other existing props
+                onAddSubmission={handleAddDealSubmission} 
                 onOpenApprovalModal={openApprovalModal}
-                onUpdateSubmissionStatus={handleUpdateSubmissionStatus} // Pass App-level handler
+                onUpdateSubmissionStatus={handleUpdateSubmissionStatus} 
                 onOpenDeclineReasonModal={openDeclineReasonModal}
-                onSaveDealChanges={handleSaveDealChanges} // Pass App-level handler
+                onSaveDealChanges={handleSaveDealChanges} 
             />
         )}
 
@@ -878,8 +1129,17 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
 };
 
 // --- Deal Detail Modal Component ---
-const DealDetailModal = React.memo(({ isOpen, onClose, deal, availableContacts, userRole, onAddNote, onAddSubmission, onOpenApprovalModal, onUpdateSubmissionStatus, onOpenDeclineReasonModal, onSaveDealChanges }) => {
-    const [newNote, setNewNote] = useState('');
+const DealDetailModal = React.memo(({ 
+    isOpen, onClose, deal, availableContacts, userRole, 
+    // Note props
+    dealNotes, modalDealNotesLoading, modalDealNotesError,
+    editingDealNoteId, setEditingDealNoteId, editingDealNoteContent, setEditingDealNoteContent,
+    dealNoteUpdateLoading, dealNoteUpdateError, deletingDealNoteId,
+    dealNoteSubmissionLoading, newDealNote, setNewDealNote,
+    onAddDealNote, onSaveEditedDealNote, onDeleteDealNote,
+    // Other props
+    onAddSubmission, onOpenApprovalModal, onUpdateSubmissionStatus, onOpenDeclineReasonModal, onSaveDealChanges 
+}) => {
     const canManage = userRole === 'Admin' || userRole === 'Owner';
     const [newSubmissionData, setNewSubmissionData] = useState({ lender_name: '', submission_date: '' });
     const [isEditing, setIsEditing] = useState(false);
@@ -906,8 +1166,8 @@ const DealDetailModal = React.memo(({ isOpen, onClose, deal, availableContacts, 
 
     const ownerName = getOwnerName(deal.ownerId, allUsers); 
     const handleContactClick = (contactId) => { console.log("Navigate to or open modal for contact ID:", contactId); alert(`Simulating opening contact details for ID: ${contactId}\n(Actual navigation/modal opening requires more complex state management)`); };
-    const handleNoteChange = (e) => { setNewNote(e.target.value); };
-    const handleAddNoteClick = () => { if (!newNote.trim()) return; onAddNote(deal.id, newNote); setNewNote(''); };
+    // handleNoteChange is now (e) => setNewDealNote(e.target.value)
+    // handleAddNoteClick is now () => onAddDealNote(deal.id)
     const handleSubmissionInputChange = (e) => { const { name, value } = e.target; setNewSubmissionData(prev => ({ ...prev, [name]: value })); };
     const handleAddSubmissionClick = () => { if (!newSubmissionData.lender_name.trim() || !newSubmissionData.submission_date) return; onAddSubmission(deal.id, newSubmissionData); setNewSubmissionData({ lender_name: '', submission_date: '' }); };
     const approvedSubmissions = useMemo(() => (deal.submissions || []).filter(sub => sub.status === 'Approved'), [deal.submissions]);
@@ -942,8 +1202,74 @@ const DealDetailModal = React.memo(({ isOpen, onClose, deal, availableContacts, 
                  {!isEditing && ( <div className="pt-4 border-t"> <h3 className="text-lg font-medium mb-3 text-gray-800">Approvals</h3> <div className="max-h-48 overflow-y-auto pr-1 border rounded-md"> {approvedSubmissions.length === 0 ? ( <p className="text-sm text-gray-500 p-3">No approvals yet.</p> ) : ( <Table className="text-xs"> <TableHeader> <TableRow> <TableHead>Lender</TableHead> <TableHead>Date</TableHead> <TableHead>Amount</TableHead> <TableHead>Term</TableHead> <TableHead>Rate (%)</TableHead> <TableHead>Stips</TableHead> <TableHead>Link</TableHead> </TableRow> </TableHeader> <TableBody> {approvedSubmissions.map(sub => ( <TableRow key={sub.id}> <TableCell>{sub.lender_name}</TableCell> <TableCell>{sub.approval_date || 'N/A'}</TableCell> <TableCell>${(sub.approval_amount || 0).toLocaleString()}</TableCell> <TableCell>{sub.approval_term || 'N/A'}</TableCell> <TableCell>{sub.approval_rate !== null ? sub.approval_rate : 'N/A'}</TableCell> <TableCell className="max-w-[150px] truncate" title={sub.stipulations || ''}>{sub.stipulations || 'N/A'}</TableCell> <TableCell> {sub.approval_link ? ( <a href={sub.approval_link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline" title={sub.approval_link}> <LinkIcon /> </a> ) : ( 'N/A' )} </TableCell> </TableRow> ))} </TableBody> </Table> )} </div> </div> )}
 
                 {/* Notes Section (Only visible when not editing deal details) */}
-                 {!isEditing && ( <div className="pt-4 border-t"> <h3 className="text-lg font-medium mb-3 text-gray-800">Notes</h3> {/* Display Existing Notes */} <div className="space-y-3 mb-4 max-h-48 overflow-y-auto pr-1"> {(deal.notes || []).length === 0 && <p className="text-sm text-gray-500">No notes yet.</p>} {(deal.notes || []).slice().reverse().map(note => ( <div key={note.id} className="text-sm p-2 border rounded-md bg-gray-50"> <p className="whitespace-pre-wrap">{note.content}</p> <p className="text-xs text-gray-500 mt-1"> {note.author} - {formatTimestamp(note.timestamp)} </p> </div> ))} </div> {/* Add New Note Area */} <div> <Label htmlFor="newDealNote">Add a Note</Label> <Textarea id="newDealNote" name="newDealNote" rows="3" value={newNote} onChange={handleNoteChange} placeholder="Type your note here..." /> <Button type="button" variant="secondary" size="sm" className="mt-2" onClick={handleAddNoteClick} disabled={!newNote.trim() || !canManage} title={!canManage ? "Admin or Owner role required" : ""}> Add Note </Button> </div> </div> )}
-
+                {!isEditing && (
+                    <div className="pt-4 border-t">
+                        <h3 className="text-lg font-medium mb-3 text-gray-800">Notes</h3>
+                        {modalDealNotesError && <p className="text-red-500 text-sm mb-2 bg-red-100 p-2 rounded-md">{modalDealNotesError}</p>}
+                        {modalDealNotesLoading ? <p className="text-sm text-gray-500">Loading notes...</p> : (
+                            <>
+                                <div className="space-y-3 mb-4 max-h-48 overflow-y-auto pr-1">
+                                    {(dealNotes || []).length === 0 && !editingDealNoteId && <p className="text-sm text-gray-500">No notes yet for this deal.</p>}
+                                    {(dealNotes || []).slice().reverse().map(note => (
+                                        <div key={note.id} className="text-sm p-2 border rounded-md bg-gray-50">
+                                            {editingDealNoteId === note.id ? (
+                                                <>
+                                                    <Textarea value={editingDealNoteContent} onChange={(e) => setEditingDealNoteContent(e.target.value)} rows="3" className="mb-2" />
+                                                    {dealNoteUpdateError && dealNoteUpdateError.id === note.id && <p className="text-red-500 text-xs mt-1">{dealNoteUpdateError.message}</p>}
+                                                    <div className="mt-2 space-x-2">
+                                                        <Button size="sm" onClick={() => onSaveEditedDealNote(note.id)} disabled={dealNoteUpdateLoading === note.id}>
+                                                            {dealNoteUpdateLoading === note.id ? "Saving..." : "Save Note"}
+                                                        </Button>
+                                                        <Button size="sm" variant="secondary" onClick={() => { setEditingDealNoteId(null); setEditingDealNoteContent(''); /* Clear specific error if needed */ }} disabled={dealNoteUpdateLoading === note.id}>
+                                                            Cancel
+                                                        </Button>
+                                                    </div>
+                                                </>
+                                            ) : (
+                                                <>
+                                                    <p className="whitespace-pre-wrap">{note.content}</p>
+                                                    <p className="text-xs text-gray-500 mt-1"> {note.author || 'System'} - {formatTimestamp(note.timestamp)} </p>
+                                                    {dealNoteUpdateError && dealNoteUpdateError.id === note.id && editingDealNoteId !== note.id && <p className="text-red-500 text-xs mt-1">{dealNoteUpdateError.message}</p>}
+                                                    {canManage && (
+                                                        <div className="mt-2 space-x-2">
+                                                            <Button variant="outline" size="sm" 
+                                                                onClick={() => { 
+                                                                    setEditingDealNoteId(note.id); 
+                                                                    setEditingDealNoteContent(note.content); 
+                                                                    /* Clear specific error if needed */ 
+                                                                }} 
+                                                                disabled={dealNoteUpdateLoading === note.id || deletingDealNoteId === note.id || (editingDealNoteId !== null && editingDealNoteId !== note.id) || dealNoteSubmissionLoading}
+                                                                title={editingDealNoteId !== null && editingDealNoteId !== note.id ? "Another note is being edited" : "Edit Note"}>
+                                                                {dealNoteUpdateLoading === note.id ? "..." : "Edit"}
+                                                            </Button>
+                                                            <Button variant="destructive" size="sm" 
+                                                                onClick={() => onDeleteDealNote(note.id)}
+                                                                disabled={dealNoteUpdateLoading === note.id || editingDealNoteId !== null || deletingDealNoteId === note.id || dealNoteSubmissionLoading}
+                                                                title={editingDealNoteId !== null ? "Finish other note actions first" : "Delete Note"}>
+                                                                {deletingDealNoteId === note.id ? "..." : <TrashIcon />}
+                                                            </Button>
+                                                        </div>
+                                                    )}
+                                                </>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                                {canManage && (
+                                    <div>
+                                        <Label htmlFor="newDealNote">Add a Note</Label>
+                                        <Textarea id="newDealNote" name="newDealNote" rows="3" value={newDealNote} onChange={(e) => setNewDealNote(e.target.value)} placeholder="Type your note here..." disabled={editingDealNoteId !== null || dealNoteSubmissionLoading} />
+                                        <Button type="button" variant="secondary" size="sm" className="mt-2" onClick={() => onAddDealNote(deal.id)} 
+                                            disabled={!newDealNote.trim() || editingDealNoteId !== null || dealNoteSubmissionLoading}
+                                            title={editingDealNoteId !== null ? "Save or cancel current note edit first" : "Add Note"}>
+                                            {dealNoteSubmissionLoading ? "Adding..." : "Add Note"}
+                                        </Button>
+                                    </div>
+                                )}
+                            </>
+                        )}
+                    </div>
+                )}
             </div>
             {/* Modal Footer */}
             <div className="mt-6 flex justify-end space-x-3 border-t pt-4">
@@ -1583,7 +1909,7 @@ function App() {
                 handleAddDealSubmission={handleAddDealSubmission}
                 handleUpdateSubmissionStatus={handleUpdateSubmissionStatus}
                 handleSaveApproval={handleSaveApproval}
-                handleAddDealNote={handleAddDealNote} // Pass the correct handler
+                // handleAddDealNote is now internal to DealsPage for managing its own notes state
             />
         )}
         {currentPage === 'tasks' && <TasksPage userRole={currentUser.role} tasks={tasks} setTasks={setTasks} />}
@@ -1593,5 +1919,7 @@ function App() {
 }
 
 export default App;
+
+[end of frontend/src/components/CrmApp.jsx]
 
 [end of frontend/src/components/CrmApp.jsx]
