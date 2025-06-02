@@ -10,6 +10,7 @@ import { NotesModule } from './notes/notes.module';
 import { AuthModule } from './auth.module';
 import { TasksModule } from './tasks/tasks.module'; // <-- Import TasksModule
 import { SubmissionsModule } from './submissions/submissions.module';
+import { UsersModule } from './users/users.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { SubmissionsModule } from './submissions/submissions.module';
       AuthModule,
       TasksModule, // <-- Add TasksModule here
       SubmissionsModule,
+      UsersModule,
   ],
   controllers: [
       AppController
