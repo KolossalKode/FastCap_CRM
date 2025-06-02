@@ -1812,62 +1812,237 @@ const DeclineReasonModal = React.memo(({ isOpen, onClose, submission, dealId, on
 
 
 // Tasks Page Component (now receives props from App)
-const TasksPage = ({ userRole, tasks, setTasks }) => {
+const TasksPage = ({ userRole, tasks, setTasks, allUsers }) => {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingTask, setEditingTask] = useState(null);
-    const [formData, setFormData] = useState({ title: '', dueDate: '', assignedTo: 'You', status: 'Pending', relatedTo: '', notes: [] });
+    const [formData, setFormData] = useState({ title: '', dueDate: '', assignedTo: '', status: 'Pending', relatedTo: '', notes: [] });
     const [newTaskNote, setNewTaskNote] = useState('');
     const canManage = userRole === 'Admin' || userRole === 'Owner';
     const [taskSearchTerm, setTaskSearchTerm] = useState('');
 
+    const [tasksLoading, setTasksLoading] = useState(true);
+    const [tasksError, setTasksError] = useState(null);
+    const [taskModalLoading, setTaskModalLoading] = useState(false);
+    const [taskModalError, setTaskModalError] = useState(null);
+    const [deletingTaskId, setDeletingTaskId] = useState(null);
+    const [taskActionError, setTaskActionError] = useState(null);
+
+    // State for Task Notes in Modal
+    const [taskModalNotesLoading, setTaskModalNotesLoading] = useState(false);
+    const [taskModalNotesError, setTaskModalNotesError] = useState(null);
+    const [editingTaskNoteId, setEditingTaskNoteId] = useState(null);
+    const [editingTaskNoteContent, setEditingTaskNoteContent] = useState('');
+    const [taskNoteUpdateLoading, setTaskNoteUpdateLoading] = useState(null); // Stores ID of note being updated
+    const [taskNoteUpdateError, setTaskNoteUpdateError] = useState(null); // { id: string, message: string }
+    const [deletingTaskNoteId, setDeletingTaskNoteId] = useState(null); // Stores ID of note being deleted
+    const [taskNoteSubmissionLoading, setTaskNoteSubmissionLoading] = useState(false);
+
+
+    useEffect(() => {
+        const fetchTasks = async () => {
+            setTasksLoading(true);
+            setTasksError(null);
+            setTaskActionError(null); // Clear action error on refresh
+            try {
+                const response = await axios.get('/tasks');
+                setTasks(response.data || []); // Ensure data is an array
+            } catch (err) {
+                console.error("Failed to fetch tasks:", err);
+                setTasksError(getAxiosErrorMessage(err));
+                setTasks([]); // Clear tasks on error
+            } finally {
+                setTasksLoading(false);
+            }
+        };
+        fetchTasks();
+    }, [setTasks]);
+
     const handleInputChange = (e) => { const { name, value } = e.target; setFormData(prev => ({ ...prev, [name]: value })); };
     const handleTaskNoteChange = (e) => { setNewTaskNote(e.target.value); };
 
-    const handleAddTaskNote = () => {
+    const handleAddTaskNote = async () => {
         if (!newTaskNote.trim() || !editingTask) return;
-        const noteToAdd = { id: `tn${Date.now()}`, content: newTaskNote, timestamp: new Date().toISOString(), author: 'You' };
-        setFormData(prev => ({ ...prev, notes: [...(prev.notes || []), noteToAdd] }));
-         setTasks(prevTasks => prevTasks.map(task =>
-            task.id === editingTask.id
-                ? { ...task, notes: [...(task.notes || []), noteToAdd] }
-                : task
-        ));
-        console.log("Simulating Add Note:", noteToAdd, "to Task ID:", editingTask.id);
-        setNewTaskNote('');
+        setTaskNoteSubmissionLoading(true);
+        setTaskModalNotesError(null); // Clear general notes error
+        setTaskNoteUpdateError(null); // Clear specific note update error
+
+        try {
+            const response = await axios.post('/notes', { content: newTaskNote, taskId: editingTask.id });
+            const newNoteData = response.data;
+            setFormData(prevFormData => ({
+                ...prevFormData,
+                notes: [newNoteData, ...(prevFormData.notes || [])].sort((a,b) => new Date(b.timestamp || b.createdAt) - new Date(a.timestamp || a.createdAt))
+            }));
+            setNewTaskNote('');
+            setEditingTaskNoteId(null); // Clear any inline edit mode
+            setEditingTaskNoteContent('');
+        } catch (err) {
+            console.error("Failed to add task note:", err);
+            setTaskModalNotesError(getAxiosErrorMessage(err)); // Use general notes error for submission failure
+        } finally {
+            setTaskNoteSubmissionLoading(false);
+        }
     };
 
+    const handleSaveEditedTaskNote = async (noteId) => {
+        if (!editingTaskNoteContent.trim()) {
+            setTaskNoteUpdateError({ id: noteId, message: "Note content cannot be empty." });
+            return;
+        }
+        setTaskNoteUpdateLoading(noteId);
+        setTaskNoteUpdateError(null);
+        try {
+            const response = await axios.patch(`/notes/${noteId}`, { content: editingTaskNoteContent });
+            setFormData(prevFormData => ({
+                ...prevFormData,
+                notes: (prevFormData.notes || []).map(n => n.id === noteId ? response.data : n).sort((a,b) => new Date(b.timestamp || b.createdAt) - new Date(a.timestamp || a.createdAt))
+            }));
+            setEditingTaskNoteId(null);
+            setEditingTaskNoteContent('');
+        } catch (err) {
+            console.error("Failed to update task note:", err);
+            setTaskNoteUpdateError({ id: noteId, message: getAxiosErrorMessage(err) });
+        } finally {
+            setTaskNoteUpdateLoading(null);
+        }
+    };
 
-    const openModal = (task = null) => {
+    const handleDeleteTaskNote = async (noteId) => {
+        if (window.confirm("Are you sure you want to delete this note?")) {
+            setDeletingTaskNoteId(noteId);
+            setTaskNoteUpdateError(null); // Clear previous errors
+            try {
+                await axios.delete(`/notes/${noteId}`);
+                setFormData(prevFormData => ({
+                    ...prevFormData,
+                    notes: (prevFormData.notes || []).filter(n => n.id !== noteId)
+                }));
+            } catch (err) {
+                console.error("Failed to delete task note:", err);
+                setTaskNoteUpdateError({ id: noteId, message: getAxiosErrorMessage(err) }); // Show error related to this note
+            } finally {
+                setDeletingTaskNoteId(null);
+            }
+        }
+    };
+
+    const openModal = async (task = null) => {
         setNewTaskNote('');
+        setTaskModalError(null); 
+        setTaskActionError(null); 
+        // Reset note specific states
+        setTaskModalNotesLoading(false);
+        setTaskModalNotesError(null);
+        setEditingTaskNoteId(null);
+        setEditingTaskNoteContent('');
+        setTaskNoteUpdateLoading(null);
+        setTaskNoteUpdateError(null);
+        setDeletingTaskNoteId(null);
+        setTaskNoteSubmissionLoading(false);
+
         if (task) {
             setEditingTask(task);
-            setFormData({ ...task, notes: task.notes || [] });
+            setFormData({ 
+                ...task, 
+                assignedTo: task.assignedTo || '', 
+                notes: [] // Initialize notes as empty, then fetch
+            });
+            setIsModalOpen(true); // Open modal before fetching notes
+
+            setTaskModalNotesLoading(true);
+            try {
+                const notesResponse = await axios.get(`/notes?taskId=${task.id}`);
+                setFormData(prevFormData => ({ ...prevFormData, notes: (notesResponse.data || []).sort((a,b) => new Date(b.timestamp || b.createdAt) - new Date(a.timestamp || a.createdAt)) }));
+            } catch (err) {
+                console.error("Failed to fetch task notes:", err);
+                setTaskModalNotesError(getAxiosErrorMessage(err));
+                setFormData(prevFormData => ({ ...prevFormData, notes: task.notes || [] })); // Fallback to any initially passed notes
+            } finally {
+                setTaskModalNotesLoading(false);
+            }
         } else {
             setEditingTask(null);
-            setFormData({ title: '', dueDate: '', assignedTo: 'You', status: 'Pending', relatedTo: '', notes: [] });
+            setFormData({ title: '', dueDate: '', assignedTo: '', status: 'Pending', relatedTo: '', notes: [] });
+            setIsModalOpen(true);
         }
-        setIsModalOpen(true);
     };
-    const closeModal = () => { setIsModalOpen(false); setEditingTask(null); };
-    const handleSubmit = (e) => {
+    const closeModal = () => { 
+        setIsModalOpen(false); 
+        setEditingTask(null); 
+        setTaskModalLoading(false); 
+        setTaskModalError(null); 
+        // Reset note states on close as well
+        setTaskModalNotesLoading(false);
+        setTaskModalNotesError(null);
+        setEditingTaskNoteId(null);
+        setEditingTaskNoteContent('');
+        setTaskNoteUpdateLoading(null);
+        setTaskNoteUpdateError(null);
+        setDeletingTaskNoteId(null);
+        setTaskNoteSubmissionLoading(false);
+    };
+
+    const handleSubmit = async (e) => {
         e.preventDefault();
-        const updatedTaskData = {
-            id: editingTask ? editingTask.id : `t${Date.now()}`,
-            title: formData.title, dueDate: formData.dueDate, assignedTo: formData.assignedTo, status: formData.status, relatedTo: formData.relatedTo, notes: formData.notes
+        if (!canManage) return;
+
+        setTaskModalLoading(true);
+        setTaskModalError(null);
+
+        const taskDataForApi = {
+            title: formData.title,
+            dueDate: formData.dueDate || null,
+            assignedTo: formData.assignedTo || null, // Backend might expect assignedUserId
+            status: formData.status,
+            relatedTo: formData.relatedTo || null,
+            // Do not send 'notes' array for create/update; notes are handled separately.
         };
+
         if (editingTask) {
-            setTasks(prev => prev.map(t => t.id === editingTask.id ? updatedTaskData : t));
-            console.log("Simulating Update Task:", updatedTaskData);
+            try {
+                const response = await axios.patch(`/tasks/${editingTask.id}`, taskDataForApi);
+                setTasks(prevTasks => prevTasks.map(t => t.id === editingTask.id ? response.data : t));
+                closeModal();
+                // setEditingTask(null); // closeModal already does this
+            } catch (err) {
+                console.error("Failed to update task:", err);
+                setTaskModalError(getAxiosErrorMessage(err));
+            } finally {
+                setTaskModalLoading(false);
+            }
         } else {
-            setTasks(prev => [...prev, updatedTaskData]);
-            console.log("Simulating Add Task:", updatedTaskData);
+            // Create New Task
+            // const taskDataForApi = { // This is now defined above
+            try {
+                const response = await axios.post('/tasks', taskDataForApi);
+                setTasks(prevTasks => [...prevTasks, response.data]);
+                closeModal();
+            } catch (err) {
+                console.error("Failed to create task:", err);
+                setTaskModalError(getAxiosErrorMessage(err));
+            } finally {
+                setTaskModalLoading(false);
+            }
         }
-        closeModal();
     };
-    const handleDelete = (taskId) => {
-        if (window.confirm("Are you sure you want to delete this task?")) {
-            setTasks(prev => prev.filter(t => t.id !== taskId));
-            console.log("Simulating Delete Task:", taskId);
+
+    const handleDelete = async (taskId, taskTitle) => {
+        if (!canManage) return;
+        if (window.confirm(`Are you sure you want to delete task: "${taskTitle}"?`)) {
+            setDeletingTaskId(taskId);
+            setTaskActionError(null); 
+            try {
+                await axios.delete(`/tasks/${taskId}`);
+                setTasks(prevTasks => prevTasks.filter(t => t.id !== taskId));
+                // alert('Task deleted successfully.'); // Optional success message
+            } catch (err) {
+                console.error("Failed to delete task:", err);
+                const errorMsg = getAxiosErrorMessage(err);
+                setTaskActionError(errorMsg);
+                alert(`Error deleting task: ${errorMsg}`); 
+            } finally {
+                setDeletingTaskId(null);
+            }
         }
     };
 
@@ -1879,6 +2054,8 @@ const TasksPage = ({ userRole, tasks, setTasks }) => {
 
     const filteredTasks = useMemo(() => { const lowerCaseSearchTerm = taskSearchTerm.toLowerCase(); if (!lowerCaseSearchTerm) { return tasks; } return tasks.filter(task => task.title.toLowerCase().includes(lowerCaseSearchTerm) ); }, [tasks, taskSearchTerm]);
 
+    if (tasksLoading) return <div className="p-6 text-center">Loading tasks...</div>;
+
     return (
         <div className="p-6">
             <div className="flex flex-col sm:flex-row justify-between sm:items-center mb-6 gap-4">
@@ -1886,32 +2063,136 @@ const TasksPage = ({ userRole, tasks, setTasks }) => {
                  <div className="relative w-full sm:w-64"> <Input type="text" placeholder="Search tasks..." value={taskSearchTerm} onChange={(e) => setTaskSearchTerm(e.target.value)} className="pl-10"/> <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"> <SearchIcon className="text-gray-400" /> </div> </div>
                 <Button onClick={() => openModal()} disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""} className="w-full sm:w-auto"> <PlusIcon className="mr-2" /> Add Task </Button>
             </div>
+            {tasksError && <p className="text-red-500 text-sm mb-3 bg-red-100 p-3 rounded-md">Error fetching tasks: {tasksError}</p>}
+            {taskActionError && <p className="text-red-500 text-sm mb-3 bg-red-100 p-3 rounded-md">Action Error: {taskActionError}</p>}
             <Card>
                 <CardContent>
                     <Table>
                         <TableHeader> <TableRow> <TableHead>Title</TableHead> <TableHead>Due Date</TableHead> <TableHead>Assigned To</TableHead> <TableHead>Status</TableHead> <TableHead>Related To</TableHead> <TableHead>Actions</TableHead> </TableRow> </TableHeader>
                         <TableBody>
-                            {filteredTasks.length > 0 ? (
+                            {!tasksLoading && !tasksError && filteredTasks.length === 0 ? (
+                                <TableRow> <TableCell colSpan="6" className="text-center text-gray-500 py-4"> No tasks found{taskSearchTerm ? ' matching your search' : '.'} </TableCell> </TableRow>
+                            ) : (
                                 filteredTasks.map((task) => (
                                     <TableRow key={task.id}>
                                         <TableCell className="font-medium"> <button onClick={() => handleTitleClick(task)} className={`text-blue-600 hover:underline disabled:text-gray-500 disabled:no-underline disabled:cursor-not-allowed`} disabled={!canManage} title={canManage ? "Edit Task" : "Admin or Owner role required"}> {task.title} </button> </TableCell>
-                                        <TableCell>{task.dueDate}</TableCell>
-                                        <TableCell>{task.assignedTo}</TableCell>
-                                        <TableCell> <span className={`px-2 py-0.5 rounded text-xs font-medium ${ task.status === 'Pending' ? 'bg-yellow-100 text-yellow-800' : task.status === 'In Progress' ? 'bg-blue-100 text-blue-800' : 'bg-green-100 text-green-800' }`}> {task.status} </span> </TableCell>
-                                        <TableCell>{task.relatedTo}</TableCell>
-                                        <TableCell> <Button variant="ghost" size="sm" className="mr-2" onClick={() => openModal(task)} disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""}> <EditIcon /> </Button> <Button variant="ghost" size="sm" className="text-red-600 hover:text-red-700" onClick={() => handleDelete(task.id)} disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""}> <TrashIcon /> </Button> </TableCell>
+                                        <TableCell>{task.dueDate ? new Date(task.dueDate).toLocaleDateString() : 'N/A'}</TableCell>
+                                        <TableCell>{getOwnerName(task.assignedTo, allUsers)}</TableCell>
+                                        <TableCell> <span className={`px-2 py-0.5 rounded text-xs font-medium ${ task.status === 'Pending' ? 'bg-yellow-100 text-yellow-800' : task.status === 'In Progress' ? 'bg-blue-100 text-blue-800' : task.status === 'Completed' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800' }`}> {task.status} </span> </TableCell>
+                                        <TableCell>{task.relatedTo || 'N/A'}</TableCell>
+                                        <TableCell> 
+                                            <Button variant="ghost" size="sm" className="mr-2" onClick={() => openModal(task)} disabled={!canManage || deletingTaskId === task.id} title={!canManage ? "Admin or Owner role required" : "Edit Task"}> <EditIcon /> </Button> 
+                                            <Button variant="ghost" size="sm" className="text-red-600 hover:text-red-700" 
+                                                onClick={() => handleDelete(task.id, task.title)} 
+                                                disabled={!canManage || deletingTaskId === task.id} 
+                                                title={!canManage ? "Admin or Owner role required" : (deletingTaskId === task.id ? "Deleting..." : "Delete Task")}> 
+                                                {deletingTaskId === task.id ? "..." : <TrashIcon />}
+                                            </Button> 
+                                        </TableCell>
                                     </TableRow>
                                 ))
-                             ) : ( <TableRow> <TableCell colSpan="6" className="text-center text-gray-500 py-4"> No tasks found{taskSearchTerm ? ' matching your search' : ''}. </TableCell> </TableRow> )}
+                             )}
                         </TableBody>
                     </Table>
                 </CardContent>
             </Card>
             <Modal isOpen={isModalOpen} onClose={closeModal} title={editingTask ? "Edit Task" : "Add New Task"}>
                 <form onSubmit={handleSubmit}>
-                    <div className="space-y-4"> <div> <Label htmlFor="title">Title</Label> <Input id="title" name="title" value={formData.title} onChange={handleInputChange} required /> </div> <div> <Label htmlFor="dueDate">Due Date</Label> <Input id="dueDate" name="dueDate" type="date" value={formData.dueDate} onChange={handleInputChange} /> </div> <div> <Label htmlFor="assignedTo">Assigned To</Label> <Input id="assignedTo" name="assignedTo" value={formData.assignedTo} onChange={handleInputChange} /> </div> <div> <Label htmlFor="status">Status</Label> <Select id="status" name="status" value={formData.status} onChange={handleInputChange}> <option>Pending</option> <option>In Progress</option> <option>Completed</option> </Select> </div> <div> <Label htmlFor="relatedTo">Related To (e.g., Deal ID, Contact ID)</Label> <Input id="relatedTo" name="relatedTo" value={formData.relatedTo} onChange={handleInputChange} /> </div> </div>
-                     {editingTask && ( <div className="mt-6 pt-4 border-t"> <h3 className="text-lg font-medium mb-3">Notes</h3> <div className="space-y-3 mb-4 max-h-48 overflow-y-auto pr-1"> {(formData.notes || []).length === 0 && <p className="text-sm text-gray-500">No notes yet.</p>} {(formData.notes || []).slice().reverse().map(note => ( <div key={note.id} className="text-sm p-2 border rounded-md bg-gray-50"> <p className="whitespace-pre-wrap">{note.content}</p> <p className="text-xs text-gray-500 mt-1"> {note.author} - {formatTimestamp(note.timestamp)} </p> </div> ))} </div> <div> <Label htmlFor="newTaskNote">Add a Note</Label> <Textarea id="newTaskNote" name="newTaskNote" rows="3" value={newTaskNote} onChange={handleTaskNoteChange} placeholder="Type your note here..." /> <Button type="button" variant="secondary" size="sm" className="mt-2" onClick={handleAddTaskNote} disabled={!newTaskNote.trim() || !canManage} title={!canManage ? "Admin or Owner role required" : ""}> Add Note </Button> </div> </div> )}
-                    <div className="mt-6 flex justify-end space-x-3 border-t pt-4"> <Button type="button" variant="secondary" onClick={closeModal}>Cancel</Button> <Button type="submit" disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""}>{editingTask ? "Update Task" : "Add Task"}</Button> </div>
+                    {taskModalError && <p className="text-red-500 text-sm mb-3 bg-red-100 p-2 rounded-md">{taskModalError}</p>}
+                    <div className="space-y-4">
+                        <div> <Label htmlFor="title">Title</Label> <Input id="title" name="title" value={formData.title} onChange={handleInputChange} required disabled={taskModalLoading} /> </div>
+                        <div> <Label htmlFor="dueDate">Due Date</Label> <Input id="dueDate" name="dueDate" type="date" value={formData.dueDate} onChange={handleInputChange} disabled={taskModalLoading} /> </div>
+                        <div> 
+                            <Label htmlFor="assignedTo">Assigned To</Label> 
+                            <Select id="assignedTo" name="assignedTo" value={formData.assignedTo} onChange={handleInputChange} disabled={taskModalLoading || !canManage} title={!canManage ? "Admin or Owner role required" : ""}>
+                                <option value="">Unassigned</option>
+                                {(allUsers || []).map(user => (
+                                    <option key={user.id} value={user.id}>{user.name} ({user.role})</option>
+                                ))}
+                            </Select>
+                        </div>
+                        <div> 
+                            <Label htmlFor="status">Status</Label> 
+                            <Select id="status" name="status" value={formData.status} onChange={handleInputChange} disabled={taskModalLoading}> 
+                                <option>Pending</option> 
+                                <option>In Progress</option> 
+                                <option>Completed</option> 
+                            </Select> 
+                        </div>
+                        <div> <Label htmlFor="relatedTo">Related To (e.g., Deal ID, Contact ID)</Label> <Input id="relatedTo" name="relatedTo" value={formData.relatedTo} onChange={handleInputChange} placeholder="Deal: deal_id or Contact: contact_id" disabled={taskModalLoading} /> </div>
+                    </div>
+
+                    {/* Notes Section - Only when editingTask is not null */}
+                    {editingTask && (
+                        <div className="mt-6 pt-4 border-t">
+                            <h3 className="text-lg font-medium mb-3">Notes</h3>
+                            {taskModalNotesError && <p className="text-red-500 text-sm mb-2 bg-red-100 p-2 rounded-md">{taskModalNotesError}</p>}
+                            {taskModalNotesLoading ? <p className="text-sm text-gray-500">Loading notes...</p> : (
+                                <>
+                                    <div className="space-y-3 mb-4 max-h-48 overflow-y-auto pr-1">
+                                        {(formData.notes || []).length === 0 && !editingTaskNoteId && <p className="text-sm text-gray-500">No notes yet for this task.</p>}
+                                        {(formData.notes || []).map(note => (
+                                            <div key={note.id} className="text-sm p-2 border rounded-md bg-gray-50">
+                                                {editingTaskNoteId === note.id ? (
+                                                    <>
+                                                        <Textarea value={editingTaskNoteContent} onChange={(e) => setEditingTaskNoteContent(e.target.value)} rows="3" className="mb-2" disabled={taskNoteUpdateLoading === note.id || deletingTaskNoteId === note.id} />
+                                                        {taskNoteUpdateError && taskNoteUpdateError.id === note.id && <p className="text-red-500 text-xs mt-1">{taskNoteUpdateError.message}</p>}
+                                                        <div className="mt-2 space-x-2">
+                                                            <Button size="sm" onClick={() => handleSaveEditedTaskNote(note.id)} disabled={taskNoteUpdateLoading === note.id || deletingTaskNoteId === note.id || !editingTaskNoteContent.trim()}>
+                                                                {taskNoteUpdateLoading === note.id ? "Saving..." : "Save Note"}
+                                                            </Button>
+                                                            <Button size="sm" variant="secondary" onClick={() => { setEditingTaskNoteId(null); setEditingTaskNoteContent(''); setTaskNoteUpdateError(null); }} disabled={taskNoteUpdateLoading === note.id || deletingTaskNoteId === note.id}>
+                                                                Cancel
+                                                            </Button>
+                                                        </div>
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <p className="whitespace-pre-wrap">{note.content}</p>
+                                                        <p className="text-xs text-gray-500 mt-1"> {(note.author && typeof note.author === 'object' ? note.author.name : note.author) || 'System'} - {formatTimestamp(note.timestamp || note.createdAt)} </p>
+                                                        {taskNoteUpdateError && taskNoteUpdateError.id === note.id && editingTaskNoteId !== note.id && <p className="text-red-500 text-xs mt-1">{taskNoteUpdateError.message}</p>}
+                                                        {canManage && (
+                                                            <div className="mt-2 space-x-2">
+                                                                <Button variant="outline" size="sm" 
+                                                                    onClick={() => { setEditingTaskNoteId(note.id); setEditingTaskNoteContent(note.content); setTaskNoteUpdateError(null); }} 
+                                                                    disabled={taskNoteUpdateLoading === note.id || deletingTaskNoteId === note.id || (editingTaskNoteId !== null && editingTaskNoteId !== note.id) || taskNoteSubmissionLoading || taskModalLoading}
+                                                                    title={editingTaskNoteId !== null && editingTaskNoteId !== note.id ? "Another note is being edited" : "Edit Note"}>
+                                                                    {taskNoteUpdateLoading === note.id ? "..." : "Edit"}
+                                                                </Button>
+                                                                <Button variant="destructive" size="sm" 
+                                                                    onClick={() => handleDeleteTaskNote(note.id)}
+                                                                    disabled={taskNoteUpdateLoading === note.id || editingTaskNoteId !== null || deletingTaskNoteId === note.id || taskNoteSubmissionLoading || taskModalLoading}
+                                                                    title={editingTaskNoteId !== null ? "Finish other note actions first" : (deletingTaskNoteId === note.id ? "Deleting..." : "Delete Note")}>
+                                                                    {deletingTaskNoteId === note.id ? "..." : <TrashIcon />}
+                                                                </Button>
+                                                            </div>
+                                                        )}
+                                                    </>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                    {canManage && (
+                                        <div>
+                                            <Label htmlFor="newTaskNote">Add a Note</Label>
+                                            <Textarea id="newTaskNote" name="newTaskNote" rows="3" value={newTaskNote} onChange={handleTaskNoteChange} placeholder="Type your note here..." disabled={editingTaskNoteId !== null || taskNoteSubmissionLoading || taskModalLoading} />
+                                            <Button type="button" variant="secondary" size="sm" className="mt-2" onClick={handleAddTaskNote} 
+                                                disabled={!newTaskNote.trim() || editingTaskNoteId !== null || taskNoteSubmissionLoading || taskModalLoading}
+                                                title={editingTaskNoteId !== null ? "Save or cancel current note edit first" : (taskNoteSubmissionLoading ? "Adding..." : "Add Note")}>
+                                                {taskNoteSubmissionLoading ? "Adding..." : "Add Note"}
+                                            </Button>
+                                        </div>
+                                    )}
+                                </>
+                            )}
+                        </div>
+                    )}
+                    <div className="mt-6 flex justify-end space-x-3 border-t pt-4"> 
+                        <Button type="button" variant="secondary" onClick={closeModal} disabled={taskModalLoading}>Cancel</Button> 
+                        <Button type="submit" disabled={!canManage || taskModalLoading || taskNoteSubmissionLoading || taskNoteUpdateLoading !== null || deletingTaskNoteId !== null} title={!canManage ? "Admin or Owner role required" : ""}>
+                            {taskModalLoading ? (editingTask ? 'Saving...' : 'Adding...') : (editingTask ? "Update Task" : "Add Task")}
+                        </Button> 
+                    </div>
                 </form>
             </Modal>
         </div>
@@ -2229,7 +2510,7 @@ function App() {
 
   const [contacts, setContacts] = useState([]); 
   const [deals, setDeals] = useState({}); 
-  const [tasks, setTasks] = useState(initialTasks);
+  const [tasks, setTasks] = useState([]); // Initialize tasks as empty array
   const [users, setUsers] = useState(mockUsers); 
 
   const allDealsFlat = useMemo(() => {
@@ -2272,7 +2553,7 @@ function App() {
                 // Removed old submission handlers from App.jsx props
             />
         )}
-        {currentPage === 'tasks' && <TasksPage userRole={currentUser.role} tasks={tasks} setTasks={setTasks} />}
+        {currentPage === 'tasks' && <TasksPage userRole={currentUser.role} tasks={tasks} setTasks={setTasks} allUsers={users} />}
         {currentPage === 'users' && <UsersPage userRole={currentUser.role} users={users} setUsers={setUsers} />} 
     </DashboardLayout>
   );
