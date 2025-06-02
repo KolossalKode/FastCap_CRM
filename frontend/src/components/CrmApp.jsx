@@ -44,8 +44,6 @@ const initialDeals = {
   'Negotiation': [], 'Closed Won': [], 'Closed Lost': [],
 };
 
-// Flatten initialDeals for easier searching/filtering by contactId
-const allDealsFlat = Object.values(initialDeals).flat();
 
 const initialTasks = [
   { id: 't1', title: 'Follow up with Alice', dueDate: '2025-04-15', assignedTo: 'You', status: 'Pending', relatedTo: 'Deal: d1', notes: [] }, // Past due
@@ -805,11 +803,23 @@ const ImportLeadsModal = ({ isOpen, onClose, userRole }) => {
 
 
 // Deals Page Component (now receives props from App)
-const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDealChanges, handleAddDealSubmission, handleUpdateSubmissionStatus, handleSaveApproval, handleAddDealNote }) => { // Added handleAddDealNote
+const DealsPage = ({ userRole, deals, setDeals, availableContacts /*, handleAddDealSubmission, handleUpdateSubmissionStatus, handleSaveApproval */ }) => { 
     // Removed useState for deals
     const [isAddDealModalOpen, setIsAddDealModalOpen] = useState(false);
-    const [newDealData, setNewDealData] = useState({ name: '', value: '', stage: DEAL_STAGES[0], contactIds: initialContacts.length > 0 ? [initialContacts[0].id] : [] });
-    // Removed availableContacts state (passed as prop)
+    const initialNewDealData = {
+        name: '', 
+        value: '', 
+        stage: DEAL_STAGES[0], 
+        contactIds: availableContacts.length > 0 ? [availableContacts[0].id] : [],
+        ownerId: null, 
+        expectedCloseDate: '',
+        dealType: DEAL_TYPES[0],
+        priority: DEAL_PRIORITIES[1], // Medium
+        nextStep: ''
+    };
+    const [newDealData, setNewDealData] = useState(initialNewDealData);
+    const { allUsers } = App.useSharedState ? App.useSharedState() : { allUsers: mockUsers }; // For owner dropdown
+
     const canManage = userRole === 'Admin' || userRole === 'Owner';
 
     const [selectedDeal, setSelectedDeal] = useState(null);
@@ -826,6 +836,14 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
     // State for Deal Search Term
     const [dealSearchTerm, setDealSearchTerm] = useState('');
 
+    // Loading and error states for fetching deals
+    const [dealsLoading, setDealsLoading] = useState(true);
+    const [dealsError, setDealsError] = useState(null);
+    
+    // Modal specific loading/error for Add Deal
+    const [addDealModalLoading, setAddDealModalLoading] = useState(false);
+    const [addDealModalError, setAddDealModalError] = useState(null);
+
     // State for Deal Notes in Modal
     const [dealNotes, setDealNotes] = useState([]);
     const [modalDealNotesLoading, setModalDealNotesLoading] = useState(false);
@@ -837,6 +855,18 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
     const [deletingDealNoteId, setDeletingDealNoteId] = useState(null);
     const [dealNoteSubmissionLoading, setDealNoteSubmissionLoading] = useState(false);
     const [newDealNote, setNewDealNote] = useState('');
+    const [dragDropError, setDragDropError] = useState(null);
+
+    // State for Deal Submissions in Modal
+    const [dealSubmissions, setDealSubmissions] = useState([]);
+    const [modalDealSubmissionsLoading, setModalDealSubmissionsLoading] = useState(false);
+    const [modalDealSubmissionsError, setModalDealSubmissionsError] = useState(null);
+    const [newSubmissionDataForm, setNewSubmissionDataForm] = useState({ lender_name: '', submission_date: '' }); 
+    const [submissionCreateLoading, setSubmissionCreateLoading] = useState(false);
+    const [submissionCreateError, setSubmissionCreateError] = useState(null);
+    const [submissionUpdateLoading, setSubmissionUpdateLoading] = useState(null); // Stores submission ID
+    const [submissionUpdateError, setSubmissionUpdateError] = useState(null); // { id: string, message: string }
+
 
     // Internal Handlers for Deal Notes (to be passed to DealDetailModal)
     const handleAddDealNoteInternal = async (dealId) => {
@@ -844,12 +874,12 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
         setDealNoteSubmissionLoading(true);
         setDealNoteUpdateError(null);
         try {
-            const response = await axios.post('/notes', { content: newDealNote, dealId: dealId });
-            setDealNotes(prevNotes => [...prevNotes, response.data]);
+            const response = await axios.post('/notes', { content: newDealNote, dealId: dealId, authorId: allUsers.find(u=>u.role===currentUser.role)?.id || 'system' }); // Assuming currentUser is available or fallback
+            setDealNotes(prevNotes => [response.data, ...prevNotes].sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp)));
             setNewDealNote('');
         } catch (err) {
             console.error("Failed to add deal note:", err);
-            setModalDealNotesError(getAxiosErrorMessage(err)); // Use general modal error for add
+            setModalDealNotesError(getAxiosErrorMessage(err)); 
         } finally {
             setDealNoteSubmissionLoading(false);
         }
@@ -860,7 +890,7 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
         setDealNoteUpdateError(null);
         try {
             const response = await axios.patch(`/notes/${noteId}`, { content: editingDealNoteContent });
-            setDealNotes(prevNotes => prevNotes.map(n => n.id === noteId ? response.data : n));
+            setDealNotes(prevNotes => prevNotes.map(n => n.id === noteId ? response.data : n).sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp)));
             setEditingDealNoteId(null);
             setEditingDealNoteContent('');
         } catch (err) {
@@ -887,34 +917,219 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
         }
     };
 
-
-    // --- Add Deal Modal Functions ---
-    const openAddDealModal = () => { setNewDealData({ name: '', value: '', stage: DEAL_STAGES[0], contactIds: availableContacts.length > 0 ? [availableContacts[0].id] : [] }); setIsAddDealModalOpen(true); };
-    const closeAddDealModal = () => setIsAddDealModalOpen(false);
-    const handleDealInputChange = (e) => { const { name, value } = e.target; setNewDealData(prev => ({ ...prev, [name]: value })); };
-    // Updated handleDealSubmit to use setDeals prop
-    const handleDealSubmit = (e) => {
-        e.preventDefault();
-        const newDeal = { ...newDealData, id: `d${Date.now()}`, value: parseFloat(newDealData.value) || 0, ownerId: null, notes: [], submissions: [] };
-        setDeals(prevDeals => {
-            const stageDeals = prevDeals[newDeal.stage] || [];
-            return { ...prevDeals, [newDeal.stage]: [...stageDeals, newDeal] };
-        });
-        console.log("Simulating Add Deal:", newDeal);
-        closeAddDealModal();
+    // --- Internal Handlers for Deal Submissions ---
+    const handleAddDealSubmissionInternal = async (dealId, submissionData) => {
+        if (!submissionData.lender_name || !submissionData.submission_date) {
+            setSubmissionCreateError("Lender Name and Submission Date are required.");
+            return;
+        }
+        setSubmissionCreateLoading(true);
+        setSubmissionCreateError(null);
+        try {
+            const payload = { ...submissionData, dealId: dealId };
+            const response = await axios.post('/submissions', payload);
+            setDealSubmissions(prev => [response.data, ...prev].sort((a, b) => new Date(b.submission_date || b.createdAt) - new Date(a.submission_date || a.createdAt)));
+            setNewSubmissionDataForm({ lender_name: '', submission_date: '' }); // Clear form
+        } catch (err) {
+            console.error("Error adding deal submission:", err);
+            setSubmissionCreateError(getAxiosErrorMessage(err));
+        } finally {
+            setSubmissionCreateLoading(false);
+        }
     };
 
+    const handleSaveSubmissionApprovalInternal = async (dealId, submissionId, approvalDataFromModal) => {
+        setSubmissionUpdateLoading(submissionId);
+        setSubmissionUpdateError(null);
+        try {
+            const payload = { 
+                status: 'Approved', 
+                ...approvalDataFromModal, 
+                decline_reason: null 
+            };
+            const response = await axios.patch(`/submissions/${submissionId}`, payload);
+            setDealSubmissions(prev => prev.map(s => s.id === submissionId ? response.data : s)
+                .sort((a, b) => new Date(b.submission_date || b.createdAt) - new Date(a.submission_date || a.createdAt))
+            );
+            closeApprovalModal(); // Close modal on success
+        } catch (err) {
+            console.error("Error saving submission approval:", err);
+            const errorMessage = getAxiosErrorMessage(err);
+            setSubmissionUpdateError({ id: submissionId, message: errorMessage });
+            // Let ApprovalEntryModal handle displaying its own errors by re-throwing
+            throw new Error(errorMessage); 
+        } finally {
+            setSubmissionUpdateLoading(null);
+        }
+    };
+
+    const handleUpdateSubmissionStatusInternal = async (dealId, submissionId, newStatus, declineReason = null) => {
+        setSubmissionUpdateLoading(submissionId);
+        setSubmissionUpdateError(null);
+        let payload = { status: newStatus, decline_reason: declineReason };
+
+        if (newStatus !== 'Approved' && newStatus !== 'Declined') { // e.g. Withdrawn or back to Submitted
+            payload = { ...payload, approval_date: null, approval_amount: null, approval_term: null, approval_rate: null, stipulations: null, approval_link: null, decline_reason: null};
+        } else if (newStatus === 'Declined') {
+             payload = { ...payload, approval_date: null, approval_amount: null, approval_term: null, approval_rate: null, stipulations: null, approval_link: null};
+        }
+        // For 'Approved', approval data is handled by handleSaveSubmissionApprovalInternal
+
+        try {
+            const response = await axios.patch(`/submissions/${submissionId}`, payload);
+            setDealSubmissions(prev => prev.map(s => s.id === submissionId ? response.data : s)
+                .sort((a, b) => new Date(b.submission_date || b.createdAt) - new Date(a.submission_date || a.createdAt))
+            );
+            if (newStatus === 'Declined') closeDeclineReasonModal(); // Close modal on success
+        } catch (err) {
+            console.error(`Error updating submission status to ${newStatus}:`, err);
+            const errorMessage = getAxiosErrorMessage(err);
+            setSubmissionUpdateError({ id: submissionId, message: errorMessage });
+            if (newStatus === 'Declined') throw new Error(errorMessage); // Re-throw for DeclineReasonModal
+        } finally {
+            setSubmissionUpdateLoading(null);
+        }
+    };
+
+
+    // --- Add Deal Modal Functions ---
+    const handleUpdateDealDetails = async (dealId, updatedDataFromModal) => {
+        // This function will be called by DealDetailModal's onSaveDealChanges
+        try {
+            const response = await axios.patch(`/deals/${dealId}`, updatedDataFromModal);
+            const updatedDeal = response.data;
+
+            setDeals(prevDeals => {
+                const newDealsState = { ...prevDeals };
+                let originalStage = null;
+
+                // Find the original stage of the deal
+                for (const stage of DEAL_STAGES) {
+                    if (newDealsState[stage] && newDealsState[stage].some(d => d.id === dealId)) {
+                        originalStage = stage;
+                        break;
+                    }
+                }
+
+                // If stage has changed, remove from old stage
+                if (originalStage && originalStage !== updatedDeal.stage) {
+                    newDealsState[originalStage] = newDealsState[originalStage].filter(d => d.id !== dealId);
+                }
+
+                // Add to new stage (or update in place if stage hasn't changed)
+                if (!newDealsState[updatedDeal.stage]) {
+                    newDealsState[updatedDeal.stage] = [];
+                }
+                newDealsState[updatedDeal.stage] = newDealsState[updatedDeal.stage].filter(d => d.id !== dealId);
+                newDealsState[updatedDeal.stage].push(updatedDeal);
+                
+                return newDealsState;
+            });
+        } catch (err) {
+            console.error("Failed to update deal details:", err);
+            throw new Error(getAxiosErrorMessage(err)); 
+        }
+    };
+
+    const openAddDealModal = () => { 
+        setNewDealData({ 
+            name: '', value: '', stage: DEAL_STAGES[0], 
+            contactIds: availableContacts.length > 0 ? [availableContacts[0].id] : [],
+            ownerId: null, expectedCloseDate: '',
+            dealType: DEAL_TYPES[0], priority: DEAL_PRIORITIES[1], nextStep: ''
+        }); 
+        setAddDealModalError(null); 
+        setIsAddDealModalOpen(true); 
+    };
+    const closeAddDealModal = () => {
+        setIsAddDealModalOpen(false);
+        setAddDealModalError(null); 
+    };
+    const handleDealInputChange = (e) => { const { name, value } = e.target; setNewDealData(prev => ({ ...prev, [name]: value })); };
+    
+    const handleDealSubmit = async (e) => {
+        e.preventDefault();
+        setAddDealModalLoading(true);
+        setAddDealModalError(null);
+        const dealDataForApi = {
+            ...newDealData,
+            value: parseFloat(newDealData.value) || 0,
+            contactIds: newDealData.contactIds.length > 0 ? newDealData.contactIds : null, 
+            ownerId: newDealData.ownerId || null, 
+        };
+        try {
+            const response = await axios.post('/deals', dealDataForApi);
+            const newDealFromApi = response.data;
+            setDeals(prevDeals => {
+                const stage = newDealFromApi.stage;
+                const stageDeals = prevDeals[stage] ? [...prevDeals[stage], newDealFromApi] : [newDealFromApi];
+                return { ...prevDeals, [stage]: stageDeals };
+            });
+            closeAddDealModal();
+        } catch (err) {
+            console.error("Failed to create deal:", err);
+            setAddDealModalError(getAxiosErrorMessage(err));
+        } finally {
+            setAddDealModalLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        const fetchDeals = async () => {
+            setDealsLoading(true);
+            setDealsError(null);
+            try {
+                const response = await axios.get('/deals');
+                const flatDeals = response.data; 
+                const groupedDeals = DEAL_STAGES.reduce((acc, stage) => {
+                   acc[stage] = (flatDeals || []).filter(deal => deal.stage === stage);
+                   return acc;
+                }, {});
+                DEAL_STAGES.forEach(stage => {
+                    if (!groupedDeals[stage]) {
+                        groupedDeals[stage] = [];
+                    }
+                });
+                setDeals(groupedDeals);
+            } catch (err) {
+                console.error("Failed to fetch deals:", err);
+                setDealsError(getAxiosErrorMessage(err));
+                setDeals({}); 
+            } finally {
+                setDealsLoading(false);
+            }
+        };
+        fetchDeals();
+    }, [setDeals]);
+
     // --- Deal Detail Modal Functions ---
+    const fetchDealSubmissions = async (dealId) => {
+        setModalDealSubmissionsLoading(true);
+        setModalDealSubmissionsError(null);
+        try {
+            const response = await axios.get(`/submissions?dealId=${dealId}`);
+            setDealSubmissions((response.data || []).sort((a, b) => 
+                new Date(b.submission_date || b.createdAt) - new Date(a.submission_date || a.createdAt)
+            ));
+        } catch (err) {
+            console.error("Failed to fetch deal submissions:", err);
+            setModalDealSubmissionsError(getAxiosErrorMessage(err));
+            setDealSubmissions([]);
+        } finally {
+            setModalDealSubmissionsLoading(false);
+        }
+    };
+
     const fetchDealNotes = async (dealId) => {
         setModalDealNotesLoading(true);
         setModalDealNotesError(null);
         try {
             const response = await axios.get(`/notes?dealId=${dealId}`);
-            setDealNotes(response.data || []);
+            setDealNotes((response.data || []).sort((a,b) => new Date(b.timestamp) - new Date(a.timestamp)) || []);
         } catch (err) {
             console.error("Failed to fetch deal notes:", err);
             setModalDealNotesError(getAxiosErrorMessage(err));
-            setDealNotes([]); // Fallback to empty array on error
+            setDealNotes([]); 
         } finally {
             setModalDealNotesLoading(false);
         }
@@ -929,18 +1144,14 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
                 break;
             }
         }
-
         if (foundDeal) {
-            setSelectedDeal({ // Keep existing selected deal logic
+            setSelectedDeal({
                 ...foundDeal,
-                // notes are now handled by dealNotes state, fetched below
-                submissions: foundDeal.submissions || [],
                 contactIds: foundDeal.contactIds || []
             });
             
-            // Reset all note states before opening/fetching
-            setDealNotes([]); // Clear previous notes
-            setModalDealNotesLoading(true); // Set loading true before fetch
+            setDealNotes([]);
+            setModalDealNotesLoading(true); 
             setModalDealNotesError(null);
             setEditingDealNoteId(null);
             setEditingDealNoteContent('');
@@ -950,7 +1161,17 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
             setDealNoteSubmissionLoading(false);
             setNewDealNote('');
 
-            fetchDealNotes(foundDeal.id); // Fetch notes for this deal
+            setDealSubmissions([]);
+            setModalDealSubmissionsLoading(true); 
+            setModalDealSubmissionsError(null);
+            setNewSubmissionDataForm({ lender_name: '', submission_date: '' }); 
+            setSubmissionCreateLoading(false);
+            setSubmissionCreateError(null);
+            setSubmissionUpdateLoading(null);
+            setSubmissionUpdateError(null);
+            
+            fetchDealNotes(foundDeal.id);
+            fetchDealSubmissions(foundDeal.id); 
             setIsDetailModalOpen(true);
         } else {
             console.error("Deal not found for ID:", dealId);
@@ -960,7 +1181,6 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
     const closeDetailModal = () => {
         setIsDetailModalOpen(false);
         setSelectedDeal(null);
-        // Reset note states on close
         setDealNotes([]);
         setModalDealNotesLoading(false);
         setModalDealNotesError(null);
@@ -971,6 +1191,32 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
         setDeletingDealNoteId(null);
         setDealNoteSubmissionLoading(false);
         setNewDealNote('');
+        setDealSubmissions([]);
+        setModalDealSubmissionsLoading(false);
+        setModalDealSubmissionsError(null);
+        setNewSubmissionDataForm({ lender_name: '', submission_date: '' });
+        setSubmissionCreateLoading(false);
+        setSubmissionCreateError(null);
+        setSubmissionUpdateLoading(null);
+        setSubmissionUpdateError(null);
+    };
+
+    const handleDeleteDeal = async (dealId) => {
+        console.log(`Attempting to delete deal ${dealId} from DealsPage`);
+        try {
+            await axios.delete(`/deals/${dealId}`);
+            setDeals(prevDealsByStage => {
+                const newDealsByStage = { ...prevDealsByStage };
+                for (const stage in newDealsByStage) {
+                    newDealsByStage[stage] = newDealsByStage[stage].filter(deal => deal.id !== dealId);
+                }
+                return newDealsByStage;
+            });
+            setDragDropError(null); 
+        } catch (err) {
+            console.error(`Error deleting deal ${dealId}:`, err);
+            throw new Error(getAxiosErrorMessage(err)); 
+        }
     };
 
    // --- Approval Entry Modal Functions ---
@@ -994,52 +1240,86 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
     };
 
     // --- Drag and Drop Functions ---
-    // Corrected handleDrop to only update state via setDeals
-    const handleDrop = (e, targetStage) => {
+    const handleDrop = async (e, targetStage) => {
         e.preventDefault();
         const dealId = e.dataTransfer.getData("dealId");
         const sourceStage = e.dataTransfer.getData("sourceStage");
         e.currentTarget.classList.remove('bg-blue-50');
+        setDragDropError(null); 
         if (dealId && sourceStage && sourceStage !== targetStage) {
+            const dealToMove = deals[sourceStage]?.find(d => d.id === dealId);
+            if (!dealToMove) {
+                console.error("Drag-and-drop: Deal not found in source stage.");
+                return;
+            }
             setDeals(prevDeals => {
-                const dealToMove = prevDeals[sourceStage]?.find(d => d.id === dealId);
-                if (!dealToMove) return prevDeals;
-                const updatedSourceDeals = prevDeals[sourceStage].filter(d => d.id !== dealId);
-                // Update the deal's stage property before adding to new stage
-                const movedDeal = { ...dealToMove, stage: targetStage };
-                const updatedTargetDeals = [...(prevDeals[targetStage] || []), movedDeal];
-                console.log(`Simulating Move Deal ${dealId} from ${sourceStage} to ${targetStage}`);
-                // Return the updated state structure
-                return { ...prevDeals, [sourceStage]: updatedSourceDeals, [targetStage]: updatedTargetDeals };
+                const newDeals = { ...prevDeals };
+                newDeals[sourceStage] = newDeals[sourceStage].filter(d => d.id !== dealId);
+                newDeals[targetStage] = [...(newDeals[targetStage] || []), { ...dealToMove, stage: targetStage }];
+                return newDeals;
             });
+            try {
+                const response = await axios.patch(`/deals/${dealId}`, { stage: targetStage });
+                const updatedDealFromApi = response.data;
+                setDeals(prevDeals => {
+                    const confirmedDeals = { ...prevDeals };
+                    for (const stageKey in confirmedDeals) {
+                        confirmedDeals[stageKey] = confirmedDeals[stageKey].filter(d => d.id !== updatedDealFromApi.id);
+                    }
+                    if (!confirmedDeals[updatedDealFromApi.stage]) {
+                        confirmedDeals[updatedDealFromApi.stage] = [];
+                    }
+                    confirmedDeals[updatedDealFromApi.stage].push(updatedDealFromApi);
+                    return confirmedDeals;
+                });
+            } catch (err) {
+                console.error("Failed to update deal stage via drag-and-drop:", err);
+                setDragDropError(getAxiosErrorMessage(err));
+                setDeals(prevDeals => {
+                    const revertedDeals = { ...prevDeals };
+                    revertedDeals[targetStage] = revertedDeals[targetStage].filter(d => d.id !== dealId);
+                    revertedDeals[sourceStage] = [...(revertedDeals[sourceStage] || []), dealToMove]; 
+                    return revertedDeals;
+                });
+            }
         }
     };
-    const handleDragStart = (e, dealId, sourceStage) => { e.dataTransfer.setData("dealId", dealId); e.dataTransfer.setData("sourceStage", sourceStage); e.currentTarget.classList.add('opacity-50'); };
+    const handleDragStart = (e, dealId, sourceStage) => { e.dataTransfer.setData("dealId", dealId); e.dataTransfer.setData("sourceStage", sourceStage); e.currentTarget.classList.add('opacity-50'); setDragDropError(null); };
     const handleDragOver = (e) => { e.preventDefault(); e.currentTarget.classList.add('bg-blue-50'); };
     const handleDragLeave = (e) => { e.currentTarget.classList.remove('bg-blue-50'); };
     const handleDragEnd = (e) => { e.currentTarget.classList.remove('opacity-50'); };
 
-   // Filter deals based on search term
-   const filteredDeals = useMemo(() => { /* ... (no changes needed here) ... */ const lowerCaseSearchTerm = dealSearchTerm.toLowerCase(); if (!lowerCaseSearchTerm) { return deals; } const result = {}; for (const stage of DEAL_STAGES) { const dealsInStage = (deals[stage] || []).filter(deal => deal.name.toLowerCase().includes(lowerCaseSearchTerm) ); result[stage] = dealsInStage; } return result; }, [deals, dealSearchTerm]);
+   const filteredDeals = useMemo(() => { 
+        const lowerCaseSearchTerm = dealSearchTerm.toLowerCase(); 
+        if (!lowerCaseSearchTerm) { return deals; } 
+        const result = {}; 
+        for (const stage of DEAL_STAGES) { 
+            const dealsInStage = (deals[stage] || []).filter(deal => 
+                deal.name.toLowerCase().includes(lowerCaseSearchTerm) 
+            ); 
+            result[stage] = dealsInStage; 
+        } 
+        return result; 
+    }, [deals, dealSearchTerm]);
 
+    if (dealsLoading) return <div className="p-6 text-center">Loading deals...</div>;
 
   return (
     <div className="p-6">
-       {/* Header: Title, Search, Add Button */}
       <div className="flex flex-col sm:flex-row justify-between sm:items-center mb-6 gap-4">
            <h1 className="text-2xl font-semibold">Deals Pipeline</h1>
-           {/* Search Input for Deals */}
            <div className="relative w-full sm:w-64"> <Input type="text" placeholder="Search deals..." value={dealSearchTerm} onChange={(e) => setDealSearchTerm(e.target.value)} className="pl-10"/> <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"> <SearchIcon className="text-gray-400" /> </div> </div>
            <Button onClick={openAddDealModal} disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""} className="w-full sm:w-auto"> <PlusIcon className="mr-2" /> Add Deal </Button>
        </div>
-      {/* Kanban Board - Use filteredDeals */}
+       {dealsError && <p className="text-red-500 text-sm mb-3 bg-red-100 p-3 rounded-md">Error fetching deals: {dealsError}</p>}
+       {dragDropError && <p className="text-red-500 text-sm mb-3 bg-red-100 p-3 rounded-md">Drag & Drop Error: {dragDropError}</p>}
       <div className="flex space-x-4 overflow-x-auto pb-4">
         {DEAL_STAGES.map((stage) => (
           <div key={stage} className="bg-gray-100 rounded-lg p-3 w-72 flex-shrink-0 h-full min-h-[300px] transition-colors duration-150"
             onDragOver={handleDragOver} onDragLeave={handleDragLeave} onDrop={(e) => handleDrop(e, stage)}>
-            <h2 className="font-semibold mb-3 text-gray-700">{stage} ({filteredDeals[stage]?.length || 0})</h2>
+            <h2 className="font-semibold mb-3 text-gray-700">{stage} ({(filteredDeals && filteredDeals[stage]?.length) || 0})</h2>
             <div className="space-y-3">
-              {(filteredDeals[stage] || []).map((deal) => (
+              {(filteredDeals && filteredDeals[stage] || []).map((deal) => (
                 <Card
                     key={deal.id}
                     className="bg-white cursor-pointer hover:shadow-md transition-shadow"
@@ -1047,7 +1327,7 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
                     onDragStart={(e) => canManage && handleDragStart(e, deal.id, stage)}
                     onDragEnd={handleDragEnd}
                     title={canManage ? "Click to view details, drag to move" : "Click to view details"}
-                    onClick={() => openDetailModal(deal.id)} // Pass deal.id
+                    onClick={() => openDetailModal(deal.id)} 
                 >
                   <CardContent className="p-3">
                     <p className="font-medium text-sm">{deal.name}</p>
@@ -1061,23 +1341,36 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
           </div>
         ))}
       </div>
-      {/* Add Deal Modal */}
       <Modal isOpen={isAddDealModalOpen} onClose={closeAddDealModal} title="Add New Deal">
           <form onSubmit={handleDealSubmit}>
-              <div className="space-y-4"> <div> <Label htmlFor="dealName">Deal Name</Label> <Input id="dealName" name="name" value={newDealData.name} onChange={handleDealInputChange} required /> </div> <div> <Label htmlFor="dealValue">Value ($)</Label> <Input id="dealValue" name="value" type="number" step="0.01" value={newDealData.value} onChange={handleDealInputChange} placeholder="e.g., 5000" required /> </div> <div> <Label htmlFor="dealStage">Stage</Label> <Select id="dealStage" name="stage" value={newDealData.stage} onChange={handleDealInputChange}> {DEAL_STAGES.map(stage => ((stage !== 'Closed Won' && stage !== 'Closed Lost') && <option key={stage} value={stage}>{stage}</option>))} </Select> </div> <div> <Label htmlFor="contactId">Associated Contact (Select First)</Label> <Select id="contactId" name="contactIds" value={newDealData.contactIds[0] || ''} onChange={(e) => setNewDealData(prev => ({...prev, contactIds: [e.target.value]}))} required> {availableContacts.length === 0 && <option disabled>No contacts available</option>} {availableContacts.map(contact => (<option key={contact.id} value={contact.id}>{contact.firstName} {contact.lastName} ({contact.company || 'N/A'})</option>))} </Select> <p className="text-xs text-gray-500 mt-1">Note: Multi-contact selection UI to be added later.</p></div> </div>
-              <div className="mt-6 flex justify-end space-x-3"> <Button type="button" variant="secondary" onClick={closeAddDealModal}>Cancel</Button> <Button type="submit">Add Deal</Button> </div>
+              {addDealModalError && <p className="text-red-500 text-sm mb-3 bg-red-100 p-2 rounded-md">{addDealModalError}</p>}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div> <Label htmlFor="dealName">Deal Name</Label> <Input id="dealName" name="name" value={newDealData.name} onChange={handleDealInputChange} required /> </div>
+                  <div> <Label htmlFor="dealValue">Value ($)</Label> <Input id="dealValue" name="value" type="number" step="0.01" value={newDealData.value} onChange={handleDealInputChange} placeholder="e.g., 5000" required /> </div>
+                  <div> <Label htmlFor="dealStage">Stage</Label> <Select id="dealStage" name="stage" value={newDealData.stage} onChange={handleDealInputChange}> {DEAL_STAGES.filter(s => s !== 'Closed Won' && s !== 'Closed Lost').map(stage => (<option key={stage} value={stage}>{stage}</option>))} </Select> </div>
+                  <div> <Label htmlFor="contactId">Associated Contact</Label> <Select id="contactId" name="contactIds" value={newDealData.contactIds[0] || ''} onChange={(e) => setNewDealData(prev => ({...prev, contactIds: e.target.value ? [e.target.value] : []}))} > <option value="">None</option> {availableContacts.map(contact => (<option key={contact.id} value={contact.id}>{contact.firstName} {contact.lastName} ({contact.company || 'N/A'})</option>))} </Select> </div>
+                  <div> <Label htmlFor="ownerId">Owner</Label> <Select id="ownerId" name="ownerId" value={newDealData.ownerId || ''} onChange={handleDealInputChange} > <option value="">Unassigned</option> {(allUsers || []).map(user => ( <option key={user.id} value={user.id}>{user.name}</option> ))} </Select> </div>
+                  <div> <Label htmlFor="expectedCloseDate">Expected Close Date</Label> <Input id="expectedCloseDate" name="expectedCloseDate" type="date" value={newDealData.expectedCloseDate} onChange={handleDealInputChange} /> </div>
+                  <div> <Label htmlFor="dealType">Deal Type</Label> <Select id="dealType" name="dealType" value={newDealData.dealType} onChange={handleDealInputChange}> {DEAL_TYPES.map(type => (<option key={type} value={type}>{type}</option>))} </Select> </div>
+                  <div> <Label htmlFor="priority">Priority</Label> <Select id="priority" name="priority" value={newDealData.priority} onChange={handleDealInputChange}> {DEAL_PRIORITIES.map(p => (<option key={p} value={p}>{p}</option>))} </Select> </div>
+                  <div className="md:col-span-2"> <Label htmlFor="nextStep">Next Step</Label> <Textarea id="nextStep" name="nextStep" rows={2} value={newDealData.nextStep} onChange={handleDealInputChange} /> </div>
+              </div>
+              <div className="mt-6 flex justify-end space-x-3"> 
+                <Button type="button" variant="secondary" onClick={closeAddDealModal} disabled={addDealModalLoading}>Cancel</Button> 
+                <Button type="submit" disabled={addDealModalLoading || !canManage} title={!canManage ? "Admin or Owner role required" : ""}>
+                    {addDealModalLoading ? "Saving..." : "Add Deal"}
+                </Button> 
+              </div>
           </form>
       </Modal>
 
-       {/* Deal Detail Modal */}
        {selectedDeal && (
             <DealDetailModal
                 isOpen={isDetailModalOpen}
                 onClose={closeDetailModal}
-                deal={selectedDeal} // Keep deal for main deal data
+                deal={selectedDeal} 
                 availableContacts={availableContacts}
                 userRole={userRole}
-                // Note-specific props from DealsPage:
                 dealNotes={dealNotes}
                 modalDealNotesLoading={modalDealNotesLoading}
                 modalDealNotesError={modalDealNotesError}
@@ -1094,34 +1387,42 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
                 onAddDealNote={handleAddDealNoteInternal}
                 onSaveEditedDealNote={handleSaveEditedDealNoteInternal}
                 onDeleteDealNote={handleDeleteDealNoteInternal}
-                // Other existing props
-                onAddSubmission={handleAddDealSubmission} 
+                dealSubmissions={dealSubmissions}
+                modalDealSubmissionsLoading={modalDealSubmissionsLoading}
+                modalDealSubmissionsError={modalDealSubmissionsError}
+                newSubmissionDataForm={newSubmissionDataForm}
+                setNewSubmissionDataForm={setNewSubmissionDataForm}
+                submissionCreateLoading={submissionCreateLoading}
+                submissionCreateError={submissionCreateError}
+                submissionUpdateLoading={submissionUpdateLoading}
+                submissionUpdateError={submissionUpdateError}
+                onAddSubmission={handleAddDealSubmissionInternal} 
+                onSaveSubmissionApproval={handleSaveSubmissionApprovalInternal} 
+                onInternalUpdateSubmissionStatus={handleUpdateSubmissionStatusInternal} 
                 onOpenApprovalModal={openApprovalModal}
-                onUpdateSubmissionStatus={handleUpdateSubmissionStatus} 
                 onOpenDeclineReasonModal={openDeclineReasonModal}
-                onSaveDealChanges={handleSaveDealChanges} 
+                onSaveDealChanges={handleUpdateDealDetails} 
+                onDeleteDeal={handleDeleteDeal}
             />
         )}
 
-        {/* Approval Entry Modal */}
         {submissionToApprove && selectedDeal && (
              <ApprovalEntryModal
                 isOpen={isApprovalModalOpen}
                 onClose={closeApprovalModal}
                 submission={submissionToApprove}
                 dealId={selectedDeal.id}
-                onSaveApproval={handleSaveApproval} // Pass App-level handler
+                onSaveApproval={handleSaveSubmissionApprovalInternal} 
              />
         )}
 
-         {/* Decline Reason Modal */}
          {submissionToDecline && selectedDeal && (
              <DeclineReasonModal
                 isOpen={isDeclineReasonModalOpen}
                 onClose={closeDeclineReasonModal}
                 submission={submissionToDecline}
                 dealId={selectedDeal.id}
-                onSaveDeclineReason={(dealId, submissionId, reason) => handleUpdateSubmissionStatus(dealId, submissionId, 'Declined', reason)}
+                onSaveDeclineReason={handleUpdateSubmissionStatusInternal} 
              />
          )}
     </div>
@@ -1131,77 +1432,139 @@ const DealsPage = ({ userRole, deals, setDeals, availableContacts, handleSaveDea
 // --- Deal Detail Modal Component ---
 const DealDetailModal = React.memo(({ 
     isOpen, onClose, deal, availableContacts, userRole, 
-    // Note props
     dealNotes, modalDealNotesLoading, modalDealNotesError,
     editingDealNoteId, setEditingDealNoteId, editingDealNoteContent, setEditingDealNoteContent,
     dealNoteUpdateLoading, dealNoteUpdateError, deletingDealNoteId,
     dealNoteSubmissionLoading, newDealNote, setNewDealNote,
     onAddDealNote, onSaveEditedDealNote, onDeleteDealNote,
-    // Other props
-    onAddSubmission, onOpenApprovalModal, onUpdateSubmissionStatus, onOpenDeclineReasonModal, onSaveDealChanges 
+    dealSubmissions, modalDealSubmissionsLoading, modalDealSubmissionsError,
+    newSubmissionDataForm, setNewSubmissionDataForm, 
+    submissionCreateLoading, submissionCreateError,
+    submissionUpdateLoading, submissionUpdateError,
+    onAddSubmission, 
+    onSaveSubmissionApproval, // New prop for actual save approval action
+    onInternalUpdateSubmissionStatus, // New prop for status updates (decline/withdraw)
+    onOpenApprovalModal, 
+    onOpenDeclineReasonModal, 
+    onSaveDealChanges, 
+    onDeleteDeal 
 }) => {
     const canManage = userRole === 'Admin' || userRole === 'Owner';
-    const [newSubmissionData, setNewSubmissionData] = useState({ lender_name: '', submission_date: '' });
     const [isEditing, setIsEditing] = useState(false);
     const [editFormData, setEditFormData] = useState({});
-    const { allUsers } = App.useSharedState ? App.useSharedState() : { allUsers: mockUsers }; // Access allUsers for DealDetailModal too
+    const [isSavingDetails, setIsSavingDetails] = useState(false);
+    const [detailsSaveError, setDetailsSaveError] = useState(null);
+    const { allUsers } = App.useSharedState ? App.useSharedState() : { allUsers: mockUsers }; 
 
-    // Updated useEffect dependency array
+    const [isDeletingDeal, setIsDeletingDeal] = useState(false);
+    const [deleteDealError, setDeleteDealError] = useState(null);
+
     useEffect(() => {
-        if (deal && isEditing) {
+        if (deal && isEditing) { 
             setEditFormData({
                 name: deal.name || '', value: deal.value || '', stage: deal.stage || DEAL_STAGES[0],
                 ownerId: deal.ownerId || null, expectedCloseDate: deal.expectedCloseDate || '',
                 dealType: deal.dealType || DEAL_TYPES[0], priority: deal.priority || DEAL_PRIORITIES[1], nextStep: deal.nextStep || '',
             });
         }
-        // Reset edit mode only when modal closes or deal changes
-        if (!isOpen) {
+        if (!isOpen) { 
             setIsEditing(false);
+            setIsDeletingDeal(false);
+            setDeleteDealError(null);
+            setDetailsSaveError(null);
+        } else { 
+            setIsDeletingDeal(false); 
+            setDeleteDealError(null);
+            setDetailsSaveError(null);
+            if (!isEditing) {
+                 setEditFormData({ 
+                    name: deal?.name || '', value: deal?.value || '', stage: deal?.stage || DEAL_STAGES[0],
+                    ownerId: deal?.ownerId || null, expectedCloseDate: deal?.expectedCloseDate || '',
+                    dealType: deal?.dealType || DEAL_TYPES[0], priority: deal?.priority || DEAL_PRIORITIES[1], nextStep: deal?.nextStep || '',
+                });
+            }
         }
-    }, [deal?.id, isEditing, isOpen]); // Depend on deal.id, isEditing, and isOpen
+    }, [deal, isOpen, isEditing]);
 
 
     if (!isOpen || !deal) return null;
 
     const ownerName = getOwnerName(deal.ownerId, allUsers); 
     const handleContactClick = (contactId) => { console.log("Navigate to or open modal for contact ID:", contactId); alert(`Simulating opening contact details for ID: ${contactId}\n(Actual navigation/modal opening requires more complex state management)`); };
-    // handleNoteChange is now (e) => setNewDealNote(e.target.value)
-    // handleAddNoteClick is now () => onAddDealNote(deal.id)
-    const handleSubmissionInputChange = (e) => { const { name, value } = e.target; setNewSubmissionData(prev => ({ ...prev, [name]: value })); };
-    const handleAddSubmissionClick = () => { if (!newSubmissionData.lender_name.trim() || !newSubmissionData.submission_date) return; onAddSubmission(deal.id, newSubmissionData); setNewSubmissionData({ lender_name: '', submission_date: '' }); };
-    const approvedSubmissions = useMemo(() => (deal.submissions || []).filter(sub => sub.status === 'Approved'), [deal.submissions]);
+    
+    const handleSubmissionFormInputChange = (e) => { const { name, value } = e.target; setNewSubmissionDataForm(prev => ({ ...prev, [name]: value })); };
+    
+    const handleAddSubmissionClick = () => { 
+        if (!newSubmissionDataForm.lender_name.trim() || !newSubmissionDataForm.submission_date) return; 
+        onAddSubmission(deal.id, newSubmissionDataForm); 
+    };
+
+    const approvedSubmissions = useMemo(() => (dealSubmissions || []).filter(sub => sub.status === 'Approved'), [dealSubmissions]);
     const handleEditInputChange = (e) => { const { name, value } = e.target; setEditFormData(prev => ({ ...prev, [name]: value })); };
 
-    // Use the passed onSaveDealChanges prop
-    const handleSaveChanges = () => { onSaveDealChanges(deal.id, editFormData); setIsEditing(false); };
-    const handleCancelEdit = () => { setIsEditing(false); };
+    const handleSaveChanges = async () => {
+        setIsSavingDetails(true);
+        setDetailsSaveError(null);
+        const payload = {
+            ...editFormData,
+            value: parseFloat(editFormData.value) || 0,
+        };
+        try {
+            await onSaveDealChanges(deal.id, payload); 
+            setIsEditing(false); 
+        } catch (err) {
+            setDetailsSaveError(err.message || err); 
+        } finally {
+            setIsSavingDetails(false);
+        }
+    };
+    const handleCancelEdit = () => { 
+        setIsEditing(false); 
+        setDetailsSaveError(null); 
+    };
 
-    // Use the passed onUpdateSubmissionStatus and onOpenDeclineReasonModal props
+    const handleConfirmDealDelete = async () => {
+        if (!deal || !onDeleteDeal) return;
+        if (window.confirm(`Are you sure you want to delete deal: ${deal.name}?`)) {
+            setIsDeletingDeal(true);
+            setDeleteDealError(null);
+            try {
+                await onDeleteDeal(deal.id);
+                onClose(); 
+            } catch (error) {
+                setDeleteDealError(error.message || "Failed to delete deal.");
+            } finally {
+                setIsDeletingDeal(false);
+            }
+        }
+    };
+
     const handleStatusUpdateClick = (submissionId, newStatus) => {
-        const submission = (deal.submissions || []).find(sub => sub.id === submissionId);
+        const submission = (dealSubmissions || []).find(sub => sub.id === submissionId); 
         if (!submission) return;
         if (newStatus === 'Declined') { onOpenDeclineReasonModal(submission); }
-        else if (newStatus === 'Withdrawn') { if (window.confirm("Are you sure you want to mark this submission as Withdrawn?")) { onUpdateSubmissionStatus(deal.id, submissionId, newStatus); } }
+        else if (newStatus === 'Withdrawn') { if (window.confirm("Are you sure you want to mark this submission as Withdrawn?")) { onInternalUpdateSubmissionStatus(deal.id, submissionId, newStatus); } }
+        // Approve is handled by ApprovalEntryModal calling onSaveSubmissionApproval
     };
 
     return (
         <Modal isOpen={isOpen} onClose={onClose} title={isEditing ? `Edit Deal: ${deal.name}` : `Deal: ${deal.name}`}>
             <div className="space-y-6">
-                {/* Display/Edit Deal Details */}
+                {/* Deal Details Section (Display/Edit) */}
                 <div>
-                    <div className="flex justify-between items-center mb-3"> <h3 className="text-lg font-medium text-gray-800">Deal Details</h3> {!isEditing && canManage && ( <Button variant="outline" size="sm" onClick={() => setIsEditing(true)}> <EditIcon className="mr-1 h-4 w-4" /> Edit </Button> )} </div>
-                    {isEditing ? ( /* EDIT MODE FORM */ <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm p-4 border rounded-md bg-gray-50"> <div> <Label htmlFor="editDealName">Deal Name</Label> <Input id="editDealName" name="name" value={editFormData.name || ''} onChange={handleEditInputChange} required /> </div> <div> <Label htmlFor="editDealValue">Value ($)</Label> <Input id="editDealValue" name="value" type="number" step="0.01" value={editFormData.value || ''} onChange={handleEditInputChange} required /> </div> <div> <Label htmlFor="editDealStage">Stage</Label> <Select id="editDealStage" name="stage" value={editFormData.stage || ''} onChange={handleEditInputChange}> {DEAL_STAGES.map(stage => (<option key={stage} value={stage}>{stage}</option>))} </Select> </div> <div> <Label htmlFor="editDealOwner">Owner</Label> <Select id="editDealOwner" name="ownerId" value={editFormData.ownerId || ''} onChange={handleEditInputChange} disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""}> <option value="">Unassigned</option> {(allUsers || mockUsers).filter(u=>u.role !== 'Rep').map(user => ( <option key={user.id} value={user.id}>{user.name} ({user.role})</option> ))} </Select> </div> <div> <Label htmlFor="editCloseDate">Expected Close Date</Label> <Input id="editCloseDate" name="expectedCloseDate" type="date" value={editFormData.expectedCloseDate || ''} onChange={handleEditInputChange} /> </div> <div> <Label htmlFor="editDealType">Deal Type</Label> <Select id="editDealType" name="dealType" value={editFormData.dealType || ''} onChange={handleEditInputChange}> {DEAL_TYPES.map(type => (<option key={type} value={type}>{type}</option>))} </Select> </div> <div> <Label htmlFor="editPriority">Priority</Label> <Select id="editPriority" name="priority" value={editFormData.priority || ''} onChange={handleEditInputChange}> {DEAL_PRIORITIES.map(p => (<option key={p} value={p}>{p}</option>))} </Select> </div> <div className="sm:col-span-2"> <Label htmlFor="editNextStep">Next Step</Label> <Textarea id="editNextStep" name="nextStep" rows={2} value={editFormData.nextStep || ''} onChange={handleEditInputChange} /> </div> </div>
-                    ) : ( /* DISPLAY MODE */ <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm p-4 border rounded-md bg-gray-50"> <div> <Label className="text-gray-500 font-medium">Deal Name</Label> <p>{deal.name}</p> </div> <div> <Label className="text-gray-500 font-medium">Value</Label> <p>${deal.value.toLocaleString()}</p> </div> <div> <Label className="text-gray-500 font-medium">Stage</Label> <p>{deal.stage}</p> </div> <div> <Label className="text-gray-500 font-medium">Associated Contacts</Label> {(deal.contactIds || []).length > 0 ? ( <div className="flex flex-wrap gap-x-2"> {(deal.contactIds).map((contactId, index) => { const contact = availableContacts.find(c => c.id === contactId); return ( <button key={contactId} onClick={() => handleContactClick(contactId)} className="text-blue-600 hover:underline focus:outline-none" title={`View details for ${contact ? `${contact.firstName} ${contact.lastName}` : 'Unknown'}`}> {contact ? `${contact.firstName} ${contact.lastName}` : <span className="text-red-500 italic">Unknown</span>} {index < deal.contactIds.length - 1 ? ',' : ''} </button> ); })} </div> ) : ( <p className="italic text-gray-500">N/A</p> )} </div> <div> <Label className="text-gray-500 font-medium">Owner</Label> <p>{ownerName}</p> </div> <div> <Label className="text-gray-500 font-medium">Expected Close Date</Label> <p>{deal.expectedCloseDate || 'N/A'}</p> </div> <div> <Label className="text-gray-500 font-medium">Deal Type</Label> <p>{deal.dealType || 'N/A'}</p> </div> <div> <Label className="text-gray-500 font-medium">Priority</Label> <p>{deal.priority || 'N/A'}</p> </div> <div className="sm:col-span-2"> <Label className="text-gray-500 font-medium">Next Step</Label> <p>{deal.nextStep || 'N/A'}</p> </div> </div> )}
+                    <div className="flex justify-between items-center mb-3"> <h3 className="text-lg font-medium text-gray-800">Deal Details</h3> {!isEditing && canManage && ( <Button variant="outline" size="sm" onClick={() => { setIsEditing(true); setDetailsSaveError(null); }}> <EditIcon className="mr-1 h-4 w-4" /> Edit </Button> )} </div>
+                    {detailsSaveError && isEditing && <p className="text-red-500 text-sm mb-2 bg-red-100 p-2 rounded-md">{detailsSaveError}</p>}
+                    {isEditing ? ( <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm p-4 border rounded-md bg-gray-50"> <div> <Label htmlFor="editDealName">Deal Name</Label> <Input id="editDealName" name="name" value={editFormData.name || ''} onChange={handleEditInputChange} required /> </div> <div> <Label htmlFor="editDealValue">Value ($)</Label> <Input id="editDealValue" name="value" type="number" step="0.01" value={editFormData.value || ''} onChange={handleEditInputChange} required /> </div> <div> <Label htmlFor="editDealStage">Stage</Label> <Select id="editDealStage" name="stage" value={editFormData.stage || ''} onChange={handleEditInputChange}> {DEAL_STAGES.map(stage => (<option key={stage} value={stage}>{stage}</option>))} </Select> </div> <div> <Label htmlFor="editDealOwner">Owner</Label> <Select id="editDealOwner" name="ownerId" value={editFormData.ownerId || ''} onChange={handleEditInputChange} disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""}> <option value="">Unassigned</option> {(allUsers || mockUsers).filter(u=>u.role !== 'Rep').map(user => ( <option key={user.id} value={user.id}>{user.name} ({user.role})</option> ))} </Select> </div> <div> <Label htmlFor="editCloseDate">Expected Close Date</Label> <Input id="editCloseDate" name="expectedCloseDate" type="date" value={editFormData.expectedCloseDate || ''} onChange={handleEditInputChange} /> </div> <div> <Label htmlFor="editDealType">Deal Type</Label> <Select id="editDealType" name="dealType" value={editFormData.dealType || ''} onChange={handleEditInputChange}> {DEAL_TYPES.map(type => (<option key={type} value={type}>{type}</option>))} </Select> </div> <div> <Label htmlFor="editPriority">Priority</Label> <Select id="editPriority" name="priority" value={editFormData.priority || ''} onChange={handleEditInputChange}> {DEAL_PRIORITIES.map(p => (<option key={p} value={p}>{p}</option>))} </Select> </div> <div className="sm:col-span-2"> <Label htmlFor="editNextStep">Next Step</Label> <Textarea id="editNextStep" name="nextStep" rows={2} value={editFormData.nextStep || ''} onChange={handleEditInputChange} /> </div> </div>
+                    ) : ( <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm p-4 border rounded-md bg-gray-50"> <div> <Label className="text-gray-500 font-medium">Deal Name</Label> <p>{deal.name}</p> </div> <div> <Label className="text-gray-500 font-medium">Value</Label> <p>${deal.value.toLocaleString()}</p> </div> <div> <Label className="text-gray-500 font-medium">Stage</Label> <p>{deal.stage}</p> </div> <div> <Label className="text-gray-500 font-medium">Associated Contacts</Label> {(deal.contactIds || []).length > 0 ? ( <div className="flex flex-wrap gap-x-2"> {(deal.contactIds).map((contactId, index) => { const contact = availableContacts.find(c => c.id === contactId); return ( <button key={contactId} onClick={() => handleContactClick(contactId)} className="text-blue-600 hover:underline focus:outline-none" title={`View details for ${contact ? `${contact.firstName} ${contact.lastName}` : 'Unknown'}`}> {contact ? `${contact.firstName} ${contact.lastName}` : <span className="text-red-500 italic">Unknown</span>} {index < deal.contactIds.length - 1 ? ',' : ''} </button> ); })} </div> ) : ( <p className="italic text-gray-500">N/A</p> )} </div> <div> <Label className="text-gray-500 font-medium">Owner</Label> <p>{ownerName}</p> </div> <div> <Label className="text-gray-500 font-medium">Expected Close Date</Label> <p>{deal.expectedCloseDate || 'N/A'}</p> </div> <div> <Label className="text-gray-500 font-medium">Deal Type</Label> <p>{deal.dealType || 'N/A'}</p> </div> <div> <Label className="text-gray-500 font-medium">Priority</Label> <p>{deal.priority || 'N/A'}</p> </div> <div className="sm:col-span-2"> <Label className="text-gray-500 font-medium">Next Step</Label> <p>{deal.nextStep || 'N/A'}</p> </div> </div> )}
                 </div>
 
-                 {/* Submissions Section (Only visible when not editing deal details) */}
-                 {!isEditing && ( <div className="pt-4 border-t"> <h3 className="text-lg font-medium mb-3 text-gray-800">Submissions</h3> {/* Add New Submission Form */} <div className="mb-4 p-3 border rounded-md bg-gray-50"> <h4 className="text-sm font-medium mb-2 text-gray-700">Add New Submission</h4> <div className="flex flex-col sm:flex-row gap-2 items-end"> <div className="flex-grow"> <Label htmlFor="lender_name" className="text-xs">Lender Name</Label> <Input id="lender_name" name="lender_name" value={newSubmissionData.lender_name} onChange={handleSubmissionInputChange} placeholder="Lender Name" /> </div> <div className="w-full sm:w-auto"> <Label htmlFor="submission_date" className="text-xs">Submission Date</Label> <Input id="submission_date" name="submission_date" type="date" value={newSubmissionData.submission_date} onChange={handleSubmissionInputChange} /> </div> <Button type="button" size="sm" onClick={handleAddSubmissionClick} disabled={!newSubmissionData.lender_name.trim() || !newSubmissionData.submission_date || !canManage} title={!canManage ? "Admin or Owner role required" : ""} className="w-full sm:w-auto"> Add </Button> </div> </div> {/* Display Existing Submissions */} <div className="max-h-48 overflow-y-auto pr-1 border rounded-md"> {(deal.submissions || []).length === 0 ? ( <p className="text-sm text-gray-500 p-3">No submissions yet.</p> ) : ( <Table className="text-xs"> <TableHeader> <TableRow> <TableHead>Lender</TableHead> <TableHead>Date</TableHead> <TableHead>Status</TableHead> <TableHead>Actions</TableHead> </TableRow> </TableHeader> <TableBody> {(deal.submissions || []).map(sub => ( <TableRow key={sub.id}> <TableCell>{sub.lender_name}</TableCell> <TableCell>{sub.submission_date}</TableCell> <TableCell> <span className={`px-2 py-0.5 rounded text-xs font-medium ${getStatusBadgeColor(sub.status, 'submission')}`}> {sub.status} </span> </TableCell> <TableCell className="space-x-1"> {sub.status === 'Submitted' && ( <> <Button variant="outline" size="sm" className="text-green-600 border-green-600 hover:bg-green-50 px-1 py-0.5" onClick={() => onOpenApprovalModal(sub)} disabled={!canManage} title={!canManage ? "Admin or Owner role required" : "Mark as Approved"}> Approve </Button> <Button variant="outline" size="sm" className="text-red-600 border-red-600 hover:bg-red-50 px-1 py-0.5" onClick={() => handleStatusUpdateClick(sub.id, 'Declined')} disabled={!canManage} title={!canManage ? "Admin or Owner role required" : "Mark as Declined"}> Decline </Button> <Button variant="outline" size="sm" className="text-yellow-600 border-yellow-600 hover:bg-yellow-50 px-1 py-0.5" onClick={() => handleStatusUpdateClick(sub.id, 'Withdrawn')} disabled={!canManage} title={!canManage ? "Admin or Owner role required" : "Mark as Withdrawn"}> Withdraw </Button> </> )} {sub.status === 'Declined' && sub.decline_reason && ( <span className="text-gray-500 italic ml-2" title={sub.decline_reason}> (Reason logged)</span> )} </TableCell> </TableRow> ))} </TableBody> </Table> )} </div> </div> )}
+                 {/* Submissions Section */}
+                 {!isEditing && ( <div className="pt-4 border-t"> <h3 className="text-lg font-medium mb-3 text-gray-800">Submissions</h3> <div className="mb-4 p-3 border rounded-md bg-gray-50"> <h4 className="text-sm font-medium mb-2 text-gray-700">Add New Submission</h4> {submissionCreateError && <p className="text-red-500 text-xs mb-2 p-1 bg-red-100 rounded">{submissionCreateError}</p>} <div className="flex flex-col sm:flex-row gap-2 items-end"> <div className="flex-grow"> <Label htmlFor="lender_name" className="text-xs">Lender Name</Label> <Input id="lender_name" name="lender_name" value={newSubmissionDataForm.lender_name} onChange={handleSubmissionFormInputChange} placeholder="Lender Name" disabled={submissionCreateLoading || submissionUpdateLoading !== null || isDeletingDeal || modalDealNotesLoading || dealNoteSubmissionLoading || editingDealNoteId !== null || deletingDealNoteId !== null} /> </div> <div className="w-full sm:w-auto"> <Label htmlFor="submission_date" className="text-xs">Submission Date</Label> <Input id="submission_date" name="submission_date" type="date" value={newSubmissionDataForm.submission_date} onChange={handleSubmissionFormInputChange} disabled={submissionCreateLoading || submissionUpdateLoading !== null || isDeletingDeal || modalDealNotesLoading || dealNoteSubmissionLoading || editingDealNoteId !== null || deletingDealNoteId !== null} /> </div> <Button type="button" size="sm" onClick={handleAddSubmissionClick} disabled={!newSubmissionDataForm.lender_name.trim() || !newSubmissionDataForm.submission_date || !canManage || submissionCreateLoading || submissionUpdateLoading !== null || isDeletingDeal || modalDealNotesLoading || dealNoteSubmissionLoading || editingDealNoteId !== null || deletingDealNoteId !== null} title={!canManage ? "Admin or Owner role required" : ""} className="w-full sm:w-auto"> {submissionCreateLoading ? "Adding..." : "Add"} </Button> </div> </div> {modalDealSubmissionsLoading && <p className="text-sm text-gray-500">Loading submissions...</p>} {modalDealSubmissionsError && <p className="text-red-500 text-sm bg-red-100 p-2 rounded-md">Error: {modalDealSubmissionsError}</p>} <div className="max-h-48 overflow-y-auto pr-1 border rounded-md"> {(dealSubmissions || []).length === 0 && !modalDealSubmissionsLoading ? ( <p className="text-sm text-gray-500 p-3">No submissions yet.</p> ) : ( <Table className="text-xs"> <TableHeader> <TableRow> <TableHead>Lender</TableHead> <TableHead>Date</TableHead> <TableHead>Status</TableHead> <TableHead>Actions</TableHead> </TableRow> </TableHeader> <TableBody> {(dealSubmissions || []).map(sub => ( <TableRow key={sub.id}> <TableCell>{sub.lender_name}</TableCell> <TableCell>{sub.submission_date}</TableCell> <TableCell> <span className={`px-2 py-0.5 rounded text-xs font-medium ${getStatusBadgeColor(sub.status, 'submission')}`}> {sub.status} {submissionUpdateLoading === sub.id && "..."}</span> {submissionUpdateError && submissionUpdateError.id === sub.id && <p className="text-red-500 text-xs mt-1">{submissionUpdateError.message}</p>} </TableCell> <TableCell className="space-x-1"> {sub.status === 'Submitted' && ( <> <Button variant="outline" size="sm" className="text-green-600 border-green-600 hover:bg-green-50 px-1 py-0.5" onClick={() => onOpenApprovalModal(sub)} disabled={!canManage || submissionUpdateLoading !== null || submissionCreateLoading || isDeletingDeal || modalDealNotesLoading || dealNoteSubmissionLoading || editingDealNoteId !== null || deletingDealNoteId !== null} title={!canManage ? "Admin or Owner role required" : "Mark as Approved"}> Approve </Button> <Button variant="outline" size="sm" className="text-red-600 border-red-600 hover:bg-red-50 px-1 py-0.5" onClick={() => handleStatusUpdateClick(sub.id, 'Declined')} disabled={!canManage || submissionUpdateLoading !== null || submissionCreateLoading || isDeletingDeal || modalDealNotesLoading || dealNoteSubmissionLoading || editingDealNoteId !== null || deletingDealNoteId !== null} title={!canManage ? "Admin or Owner role required" : "Mark as Declined"}> Decline </Button> <Button variant="outline" size="sm" className="text-yellow-600 border-yellow-600 hover:bg-yellow-50 px-1 py-0.5" onClick={() => handleStatusUpdateClick(sub.id, 'Withdrawn')} disabled={!canManage || submissionUpdateLoading !== null || submissionCreateLoading || isDeletingDeal || modalDealNotesLoading || dealNoteSubmissionLoading || editingDealNoteId !== null || deletingDealNoteId !== null} title={!canManage ? "Admin or Owner role required" : "Mark as Withdrawn"}> Withdraw </Button> </> )} {sub.status === 'Declined' && sub.decline_reason && ( <span className="text-gray-500 italic ml-2" title={sub.decline_reason}> (Reason logged)</span> )} </TableCell> </TableRow> ))} </TableBody> </Table> )} </div> </div> )}
 
-                 {/* Approvals Section (Only visible when not editing deal details) */}
-                 {!isEditing && ( <div className="pt-4 border-t"> <h3 className="text-lg font-medium mb-3 text-gray-800">Approvals</h3> <div className="max-h-48 overflow-y-auto pr-1 border rounded-md"> {approvedSubmissions.length === 0 ? ( <p className="text-sm text-gray-500 p-3">No approvals yet.</p> ) : ( <Table className="text-xs"> <TableHeader> <TableRow> <TableHead>Lender</TableHead> <TableHead>Date</TableHead> <TableHead>Amount</TableHead> <TableHead>Term</TableHead> <TableHead>Rate (%)</TableHead> <TableHead>Stips</TableHead> <TableHead>Link</TableHead> </TableRow> </TableHeader> <TableBody> {approvedSubmissions.map(sub => ( <TableRow key={sub.id}> <TableCell>{sub.lender_name}</TableCell> <TableCell>{sub.approval_date || 'N/A'}</TableCell> <TableCell>${(sub.approval_amount || 0).toLocaleString()}</TableCell> <TableCell>{sub.approval_term || 'N/A'}</TableCell> <TableCell>{sub.approval_rate !== null ? sub.approval_rate : 'N/A'}</TableCell> <TableCell className="max-w-[150px] truncate" title={sub.stipulations || ''}>{sub.stipulations || 'N/A'}</TableCell> <TableCell> {sub.approval_link ? ( <a href={sub.approval_link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline" title={sub.approval_link}> <LinkIcon /> </a> ) : ( 'N/A' )} </TableCell> </TableRow> ))} </TableBody> </Table> )} </div> </div> )}
-
-                {/* Notes Section (Only visible when not editing deal details) */}
+                 {/* Approvals Section */}
+                 {!isEditing && ( <div className="pt-4 border-t"> <h3 className="text-lg font-medium mb-3 text-gray-800">Approvals</h3> {modalDealSubmissionsLoading && <p className="text-sm text-gray-500">Loading approvals...</p>} <div className="max-h-48 overflow-y-auto pr-1 border rounded-md"> {approvedSubmissions.length === 0 && !modalDealSubmissionsLoading ? ( <p className="text-sm text-gray-500 p-3">No approvals yet.</p> ) : ( <Table className="text-xs"> <TableHeader> <TableRow> <TableHead>Lender</TableHead> <TableHead>Date</TableHead> <TableHead>Amount</TableHead> <TableHead>Term</TableHead> <TableHead>Rate (%)</TableHead> <TableHead>Stips</TableHead> <TableHead>Link</TableHead> </TableRow> </TableHeader> <TableBody> {approvedSubmissions.map(sub => ( <TableRow key={sub.id}> <TableCell>{sub.lender_name}</TableCell> <TableCell>{sub.approval_date || 'N/A'}</TableCell> <TableCell>${(sub.approval_amount || 0).toLocaleString()}</TableCell> <TableCell>{sub.approval_term || 'N/A'}</TableCell> <TableCell>{sub.approval_rate !== null ? sub.approval_rate : 'N/A'}</TableCell> <TableCell className="max-w-[150px] truncate" title={sub.stipulations || ''}>{sub.stipulations || 'N/A'}</TableCell> <TableCell> {sub.approval_link ? ( <a href={sub.approval_link} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline" title={sub.approval_link}> <LinkIcon /> </a> ) : ( 'N/A' )} </TableCell> </TableRow> ))} </TableBody> </Table> )} </div> </div> )}
+                 
+                {/* Notes Section */}
                 {!isEditing && (
                     <div className="pt-4 border-t">
                         <h3 className="text-lg font-medium mb-3 text-gray-800">Notes</h3>
@@ -1220,7 +1583,7 @@ const DealDetailModal = React.memo(({
                                                         <Button size="sm" onClick={() => onSaveEditedDealNote(note.id)} disabled={dealNoteUpdateLoading === note.id}>
                                                             {dealNoteUpdateLoading === note.id ? "Saving..." : "Save Note"}
                                                         </Button>
-                                                        <Button size="sm" variant="secondary" onClick={() => { setEditingDealNoteId(null); setEditingDealNoteContent(''); /* Clear specific error if needed */ }} disabled={dealNoteUpdateLoading === note.id}>
+                                                        <Button size="sm" variant="secondary" onClick={() => { setEditingDealNoteId(null); setEditingDealNoteContent(''); }} disabled={dealNoteUpdateLoading === note.id}>
                                                             Cancel
                                                         </Button>
                                                     </div>
@@ -1233,18 +1596,14 @@ const DealDetailModal = React.memo(({
                                                     {canManage && (
                                                         <div className="mt-2 space-x-2">
                                                             <Button variant="outline" size="sm" 
-                                                                onClick={() => { 
-                                                                    setEditingDealNoteId(note.id); 
-                                                                    setEditingDealNoteContent(note.content); 
-                                                                    /* Clear specific error if needed */ 
-                                                                }} 
-                                                                disabled={dealNoteUpdateLoading === note.id || deletingDealNoteId === note.id || (editingDealNoteId !== null && editingDealNoteId !== note.id) || dealNoteSubmissionLoading}
+                                                                onClick={() => { setEditingDealNoteId(note.id); setEditingDealNoteContent(note.content); }} 
+                                                                disabled={dealNoteUpdateLoading === note.id || deletingDealNoteId === note.id || (editingDealNoteId !== null && editingDealNoteId !== note.id) || dealNoteSubmissionLoading || submissionCreateLoading || submissionUpdateLoading !== null}
                                                                 title={editingDealNoteId !== null && editingDealNoteId !== note.id ? "Another note is being edited" : "Edit Note"}>
                                                                 {dealNoteUpdateLoading === note.id ? "..." : "Edit"}
                                                             </Button>
                                                             <Button variant="destructive" size="sm" 
                                                                 onClick={() => onDeleteDealNote(note.id)}
-                                                                disabled={dealNoteUpdateLoading === note.id || editingDealNoteId !== null || deletingDealNoteId === note.id || dealNoteSubmissionLoading}
+                                                                disabled={dealNoteUpdateLoading === note.id || editingDealNoteId !== null || deletingDealNoteId === note.id || dealNoteSubmissionLoading || submissionCreateLoading || submissionUpdateLoading !== null}
                                                                 title={editingDealNoteId !== null ? "Finish other note actions first" : "Delete Note"}>
                                                                 {deletingDealNoteId === note.id ? "..." : <TrashIcon />}
                                                             </Button>
@@ -1258,9 +1617,9 @@ const DealDetailModal = React.memo(({
                                 {canManage && (
                                     <div>
                                         <Label htmlFor="newDealNote">Add a Note</Label>
-                                        <Textarea id="newDealNote" name="newDealNote" rows="3" value={newDealNote} onChange={(e) => setNewDealNote(e.target.value)} placeholder="Type your note here..." disabled={editingDealNoteId !== null || dealNoteSubmissionLoading} />
+                                        <Textarea id="newDealNote" name="newDealNote" rows="3" value={newDealNote} onChange={(e) => setNewDealNote(e.target.value)} placeholder="Type your note here..." disabled={editingDealNoteId !== null || dealNoteSubmissionLoading || submissionCreateLoading || submissionUpdateLoading !== null} />
                                         <Button type="button" variant="secondary" size="sm" className="mt-2" onClick={() => onAddDealNote(deal.id)} 
-                                            disabled={!newDealNote.trim() || editingDealNoteId !== null || dealNoteSubmissionLoading}
+                                            disabled={!newDealNote.trim() || editingDealNoteId !== null || dealNoteSubmissionLoading || submissionCreateLoading || submissionUpdateLoading !== null}
                                             title={editingDealNoteId !== null ? "Save or cancel current note edit first" : "Add Note"}>
                                             {dealNoteSubmissionLoading ? "Adding..." : "Add Note"}
                                         </Button>
@@ -1272,22 +1631,62 @@ const DealDetailModal = React.memo(({
                 )}
             </div>
             {/* Modal Footer */}
-            <div className="mt-6 flex justify-end space-x-3 border-t pt-4">
-                 {isEditing ? ( <> <Button type="button" variant="secondary" onClick={handleCancelEdit}>Cancel</Button> <Button type="button" onClick={handleSaveChanges}>Save Changes</Button> </> ) : ( <Button type="button" variant="secondary" onClick={onClose}>Close</Button> )}
+            <div className="mt-6 flex justify-between items-center border-t pt-4"> 
+                <div> 
+                    {!isEditing && ( 
+                        <>
+                            <Button
+                                variant="destructive"
+                                onClick={handleConfirmDealDelete}
+                                disabled={!canManage || isSavingDetails || isDeletingDeal || modalDealNotesLoading || dealNoteSubmissionLoading || editingDealNoteId !== null || deletingDealNoteId !== null || dealNoteUpdateLoading !== null || submissionCreateLoading || submissionUpdateLoading !== null}
+                                title={!canManage ? "Admin or Owner role required to delete" : "Delete Deal"}
+                            >
+                                {isDeletingDeal ? "Deleting..." : "Delete Deal"}
+                            </Button>
+                            {deleteDealError && <p className="text-red-500 text-xs mt-1">{deleteDealError}</p>}
+                        </>
+                    )}
+                </div>
+                <div className="space-x-3"> 
+                    {isEditing ? (
+                        <>
+                            <Button 
+                                type="button" variant="secondary" onClick={handleCancelEdit} 
+                                disabled={isSavingDetails || isDeletingDeal}
+                            >
+                                Cancel
+                            </Button>
+                            <Button 
+                                type="button" onClick={handleSaveChanges} 
+                                disabled={isSavingDetails || isDeletingDeal || modalDealNotesLoading || dealNoteSubmissionLoading || editingDealNoteId !== null || deletingDealNoteId !== null || dealNoteUpdateLoading !== null || submissionCreateLoading || submissionUpdateLoading !== null}
+                            >
+                                {isSavingDetails ? "Saving..." : "Save Changes"}
+                            </Button>
+                        </>
+                    ) : (
+                         <Button type="button" variant="secondary" onClick={onClose} disabled={isDeletingDeal || submissionCreateLoading || submissionUpdateLoading !== null}>Close</Button>
+                    )}
+                </div>
             </div>
+            {detailsSaveError && !isEditing && !isDeletingDeal && <p className="text-red-500 text-sm mt-2 text-right">{detailsSaveError}</p>}
         </Modal>
     );
-}); // End of React.memo for DealDetailModal
+}); 
 
 // --- Approval Entry Modal Component ---
 const ApprovalEntryModal = React.memo(({ isOpen, onClose, submission, dealId, onSaveApproval }) => {
     const [approvalData, setApprovalData] = useState({
         approval_date: '', approval_amount: '', approval_term: '', approval_rate: '', stipulations: '', approval_link: ''
     });
+    const [isSaving, setIsSaving] = useState(false);
+    const [saveError, setSaveError] = useState(null);
 
-    React.useEffect(() => {
+
+    useEffect(() => {
         if (isOpen) {
             setApprovalData({ approval_date: '', approval_amount: '', approval_term: '', approval_rate: '', stipulations: '', approval_link: '' });
+            setIsSaving(false);
+            setSaveError(null);
         }
     }, [isOpen, submission]);
 
@@ -1299,8 +1698,10 @@ const ApprovalEntryModal = React.memo(({ isOpen, onClose, submission, dealId, on
         setApprovalData(prev => ({ ...prev, [name]: value }));
     };
 
-    const handleSubmit = (e) => {
+    const handleSubmit = async (e) => {
         e.preventDefault();
+        setIsSaving(true);
+        setSaveError(null);
         const dataToSave = {
             approval_date: approvalData.approval_date,
             approval_amount: parseFloat(approvalData.approval_amount) || null,
@@ -1309,63 +1710,82 @@ const ApprovalEntryModal = React.memo(({ isOpen, onClose, submission, dealId, on
             stipulations: approvalData.stipulations,
             approval_link: approvalData.approval_link
         };
-        onSaveApproval(dealId, submission.id, dataToSave);
+        try {
+            await onSaveApproval(dealId, submission.id, dataToSave); // This now calls DealsPage.handleSaveSubmissionApprovalInternal
+            // The parent (DealsPage) will close the modal if this promise resolves
+        } catch (error) {
+            setSaveError(error.message || "Failed to save approval.");
+        } finally {
+            setIsSaving(false);
+        }
     };
 
     return (
         <Modal isOpen={isOpen} onClose={onClose} title={`Enter Approval for ${submission.lender_name}`}>
             <form onSubmit={handleSubmit}>
+                {saveError && <p className="text-red-500 text-sm mb-3 bg-red-100 p-2 rounded-md">{saveError}</p>}
                 <div className="space-y-4 text-sm">
-                     {/* Display Lender and Submission Date (read-only) */}
                      <div className="grid grid-cols-2 gap-4 mb-4">
                         <div><Label className="text-gray-500">Lender</Label><p>{submission.lender_name}</p></div>
                         <div><Label className="text-gray-500">Submission Date</Label><p>{submission.submission_date}</p></div>
                      </div>
-
-                     {/* Approval Input Fields */}
                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div> <Label htmlFor="approval_date">Approval Date</Label> <Input id="approval_date" name="approval_date" type="date" value={approvalData.approval_date} onChange={handleInputChange} required /> </div>
-                        <div> <Label htmlFor="approval_amount">Approval Amount ($)</Label> <Input id="approval_amount" name="approval_amount" type="number" step="0.01" placeholder="e.g., 5000" value={approvalData.approval_amount} onChange={handleInputChange} /> </div>
-                        <div> <Label htmlFor="approval_term">Term (e.g., 12 months)</Label> <Input id="approval_term" name="approval_term" type="text" placeholder="e.g., 12 months" value={approvalData.approval_term} onChange={handleInputChange} /> </div>
-                        <div> <Label htmlFor="approval_rate">Rate (%)</Label> <Input id="approval_rate" name="approval_rate" type="number" step="0.01" placeholder="e.g., 5.5" value={approvalData.approval_rate} onChange={handleInputChange} /> </div>
-                        <div className="md:col-span-2"> <Label htmlFor="approval_link">Approval Link (URL)</Label> <Input id="approval_link" name="approval_link" type="url" placeholder="https://example.com/approval/doc" value={approvalData.approval_link} onChange={handleInputChange} /> </div>
-                        <div className="md:col-span-2"> <Label htmlFor="stipulations">Stipulations</Label> <Textarea id="stipulations" name="stipulations" rows="3" value={approvalData.stipulations} onChange={handleInputChange} placeholder="Enter any stipulations..." /> </div>
+                        <div> <Label htmlFor="approval_date">Approval Date</Label> <Input id="approval_date" name="approval_date" type="date" value={approvalData.approval_date} onChange={handleInputChange} required disabled={isSaving} /> </div>
+                        <div> <Label htmlFor="approval_amount">Approval Amount ($)</Label> <Input id="approval_amount" name="approval_amount" type="number" step="0.01" placeholder="e.g., 5000" value={approvalData.approval_amount} onChange={handleInputChange} disabled={isSaving}/> </div>
+                        <div> <Label htmlFor="approval_term">Term (e.g., 12 months)</Label> <Input id="approval_term" name="approval_term" type="text" placeholder="e.g., 12 months" value={approvalData.approval_term} onChange={handleInputChange} disabled={isSaving}/> </div>
+                        <div> <Label htmlFor="approval_rate">Rate (%)</Label> <Input id="approval_rate" name="approval_rate" type="number" step="0.01" placeholder="e.g., 5.5" value={approvalData.approval_rate} onChange={handleInputChange} disabled={isSaving}/> </div>
+                        <div className="md:col-span-2"> <Label htmlFor="approval_link">Approval Link (URL)</Label> <Input id="approval_link" name="approval_link" type="url" placeholder="https://example.com/approval/doc" value={approvalData.approval_link} onChange={handleInputChange} disabled={isSaving}/> </div>
+                        <div className="md:col-span-2"> <Label htmlFor="stipulations">Stipulations</Label> <Textarea id="stipulations" name="stipulations" rows="3" value={approvalData.stipulations} onChange={handleInputChange} placeholder="Enter any stipulations..." disabled={isSaving}/> </div>
                      </div>
                 </div>
-                 {/* Modal Footer */}
                 <div className="mt-6 flex justify-end space-x-3 border-t pt-4">
-                    <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
-                    <Button type="submit">Save Approval</Button>
+                    <Button type="button" variant="secondary" onClick={onClose} disabled={isSaving}>Cancel</Button>
+                    <Button type="submit" disabled={isSaving}>{isSaving ? "Saving..." : "Save Approval"}</Button>
                 </div>
             </form>
         </Modal>
     );
-}); // End of React.memo for ApprovalEntryModal
+}); 
 
 // --- Decline Reason Modal Component ---
 const DeclineReasonModal = React.memo(({ isOpen, onClose, submission, dealId, onSaveDeclineReason }) => {
     const [reason, setReason] = useState('');
+    const [isSaving, setIsSaving] = useState(false);
+    const [saveError, setSaveError] = useState(null);
 
     React.useEffect(() => {
         if (isOpen) {
-            setReason(''); // Reset reason when opening
+            setReason(''); 
+            setIsSaving(false);
+            setSaveError(null);
         }
     }, [isOpen]);
 
     if (!isOpen || !submission) return null;
 
-    const handleSubmit = (e) => {
+    const handleSubmit = async (e) => {
         e.preventDefault();
         if (!reason.trim()) {
-            alert("Please enter a decline reason."); // Basic validation
+            setSaveError("Please enter a decline reason."); 
             return;
         }
-        onSaveDeclineReason(dealId, submission.id, reason);
+        setIsSaving(true);
+        setSaveError(null);
+        try {
+            // onSaveDeclineReason now points to DealsPage.handleUpdateSubmissionStatusInternal
+            await onSaveDeclineReason(dealId, submission.id, 'Declined', reason); 
+            // Parent (DealsPage) will close the modal if this promise resolves
+        } catch (error) {
+            setSaveError(error.message || "Failed to save decline reason.");
+        } finally {
+            setIsSaving(false);
+        }
     };
 
     return (
          <Modal isOpen={isOpen} onClose={onClose} title={`Decline Reason for ${submission.lender_name}`}>
             <form onSubmit={handleSubmit}>
+                {saveError && <p className="text-red-500 text-sm mb-3 bg-red-100 p-2 rounded-md">{saveError}</p>}
                 <div className="space-y-4 text-sm">
                      <div>
                         <Label htmlFor="decline_reason">Reason for Decline</Label>
@@ -1377,35 +1797,32 @@ const DeclineReasonModal = React.memo(({ isOpen, onClose, submission, dealId, on
                             onChange={(e) => setReason(e.target.value)}
                             placeholder="Enter the reason provided by the lender..."
                             required
+                            disabled={isSaving}
                         />
                      </div>
                 </div>
-                 {/* Modal Footer */}
                 <div className="mt-6 flex justify-end space-x-3 border-t pt-4">
-                    <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
-                    <Button type="submit">Save Decline Reason</Button>
+                    <Button type="button" variant="secondary" onClick={onClose} disabled={isSaving}>Cancel</Button>
+                    <Button type="submit" disabled={isSaving}>{isSaving ? "Saving..." : "Save Decline Reason"}</Button>
                 </div>
             </form>
         </Modal>
     );
-}); // End of React.memo for DeclineReasonModal
+}); 
 
 
 // Tasks Page Component (now receives props from App)
 const TasksPage = ({ userRole, tasks, setTasks }) => {
-    // Removed useState for tasks
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingTask, setEditingTask] = useState(null);
     const [formData, setFormData] = useState({ title: '', dueDate: '', assignedTo: 'You', status: 'Pending', relatedTo: '', notes: [] });
     const [newTaskNote, setNewTaskNote] = useState('');
     const canManage = userRole === 'Admin' || userRole === 'Owner';
-    // State for Task Search Term
     const [taskSearchTerm, setTaskSearchTerm] = useState('');
 
     const handleInputChange = (e) => { const { name, value } = e.target; setFormData(prev => ({ ...prev, [name]: value })); };
     const handleTaskNoteChange = (e) => { setNewTaskNote(e.target.value); };
 
-    // Updated handleAddTaskNote to use setTasks prop
     const handleAddTaskNote = () => {
         if (!newTaskNote.trim() || !editingTask) return;
         const noteToAdd = { id: `tn${Date.now()}`, content: newTaskNote, timestamp: new Date().toISOString(), author: 'You' };
@@ -1432,7 +1849,6 @@ const TasksPage = ({ userRole, tasks, setTasks }) => {
         setIsModalOpen(true);
     };
     const closeModal = () => { setIsModalOpen(false); setEditingTask(null); };
-     // Updated handleSubmit to use setTasks prop
     const handleSubmit = (e) => {
         e.preventDefault();
         const updatedTaskData = {
@@ -1448,7 +1864,6 @@ const TasksPage = ({ userRole, tasks, setTasks }) => {
         }
         closeModal();
     };
-    // Updated handleDelete to use setTasks prop
     const handleDelete = (taskId) => {
         if (window.confirm("Are you sure you want to delete this task?")) {
             setTasks(prev => prev.filter(t => t.id !== taskId));
@@ -1456,22 +1871,18 @@ const TasksPage = ({ userRole, tasks, setTasks }) => {
         }
     };
 
-    // Function to handle clicking the title to edit
     const handleTitleClick = (task) => {
         if (canManage) {
             openModal(task);
         }
     };
 
-    // Filter tasks based on search term
-    const filteredTasks = useMemo(() => { /* ... (no changes needed here) ... */ const lowerCaseSearchTerm = taskSearchTerm.toLowerCase(); if (!lowerCaseSearchTerm) { return tasks; } return tasks.filter(task => task.title.toLowerCase().includes(lowerCaseSearchTerm) ); }, [tasks, taskSearchTerm]);
+    const filteredTasks = useMemo(() => { const lowerCaseSearchTerm = taskSearchTerm.toLowerCase(); if (!lowerCaseSearchTerm) { return tasks; } return tasks.filter(task => task.title.toLowerCase().includes(lowerCaseSearchTerm) ); }, [tasks, taskSearchTerm]);
 
     return (
         <div className="p-6">
-            {/* Header: Title, Search, Add Button */}
             <div className="flex flex-col sm:flex-row justify-between sm:items-center mb-6 gap-4">
                 <h1 className="text-2xl font-semibold">Tasks</h1>
-                 {/* Search Input for Tasks */}
                  <div className="relative w-full sm:w-64"> <Input type="text" placeholder="Search tasks..." value={taskSearchTerm} onChange={(e) => setTaskSearchTerm(e.target.value)} className="pl-10"/> <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"> <SearchIcon className="text-gray-400" /> </div> </div>
                 <Button onClick={() => openModal()} disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""} className="w-full sm:w-auto"> <PlusIcon className="mr-2" /> Add Task </Button>
             </div>
@@ -1480,7 +1891,6 @@ const TasksPage = ({ userRole, tasks, setTasks }) => {
                     <Table>
                         <TableHeader> <TableRow> <TableHead>Title</TableHead> <TableHead>Due Date</TableHead> <TableHead>Assigned To</TableHead> <TableHead>Status</TableHead> <TableHead>Related To</TableHead> <TableHead>Actions</TableHead> </TableRow> </TableHeader>
                         <TableBody>
-                            {/* Map over filteredTasks */}
                             {filteredTasks.length > 0 ? (
                                 filteredTasks.map((task) => (
                                     <TableRow key={task.id}>
@@ -1497,14 +1907,10 @@ const TasksPage = ({ userRole, tasks, setTasks }) => {
                     </Table>
                 </CardContent>
             </Card>
-            {/* Add/Edit Task Modal */}
             <Modal isOpen={isModalOpen} onClose={closeModal} title={editingTask ? "Edit Task" : "Add New Task"}>
                 <form onSubmit={handleSubmit}>
-                    {/* Task Fields */}
                     <div className="space-y-4"> <div> <Label htmlFor="title">Title</Label> <Input id="title" name="title" value={formData.title} onChange={handleInputChange} required /> </div> <div> <Label htmlFor="dueDate">Due Date</Label> <Input id="dueDate" name="dueDate" type="date" value={formData.dueDate} onChange={handleInputChange} /> </div> <div> <Label htmlFor="assignedTo">Assigned To</Label> <Input id="assignedTo" name="assignedTo" value={formData.assignedTo} onChange={handleInputChange} /> </div> <div> <Label htmlFor="status">Status</Label> <Select id="status" name="status" value={formData.status} onChange={handleInputChange}> <option>Pending</option> <option>In Progress</option> <option>Completed</option> </Select> </div> <div> <Label htmlFor="relatedTo">Related To (e.g., Deal ID, Contact ID)</Label> <Input id="relatedTo" name="relatedTo" value={formData.relatedTo} onChange={handleInputChange} /> </div> </div>
-                    {/* Notes Section */}
-                     {editingTask && ( <div className="mt-6 pt-4 border-t"> <h3 className="text-lg font-medium mb-3">Notes</h3> {/* Display Existing Notes */} <div className="space-y-3 mb-4 max-h-48 overflow-y-auto pr-1"> {(formData.notes || []).length === 0 && <p className="text-sm text-gray-500">No notes yet.</p>} {(formData.notes || []).slice().reverse().map(note => ( <div key={note.id} className="text-sm p-2 border rounded-md bg-gray-50"> <p className="whitespace-pre-wrap">{note.content}</p> <p className="text-xs text-gray-500 mt-1"> {note.author} - {formatTimestamp(note.timestamp)} </p> </div> ))} </div> {/* Add New Note Area */} <div> <Label htmlFor="newTaskNote">Add a Note</Label> <Textarea id="newTaskNote" name="newTaskNote" rows="3" value={newTaskNote} onChange={handleTaskNoteChange} placeholder="Type your note here..." /> <Button type="button" variant="secondary" size="sm" className="mt-2" onClick={handleAddTaskNote} disabled={!newTaskNote.trim() || !canManage} title={!canManage ? "Admin or Owner role required" : ""}> Add Note </Button> </div> </div> )}
-                    {/* Modal Footer */}
+                     {editingTask && ( <div className="mt-6 pt-4 border-t"> <h3 className="text-lg font-medium mb-3">Notes</h3> <div className="space-y-3 mb-4 max-h-48 overflow-y-auto pr-1"> {(formData.notes || []).length === 0 && <p className="text-sm text-gray-500">No notes yet.</p>} {(formData.notes || []).slice().reverse().map(note => ( <div key={note.id} className="text-sm p-2 border rounded-md bg-gray-50"> <p className="whitespace-pre-wrap">{note.content}</p> <p className="text-xs text-gray-500 mt-1"> {note.author} - {formatTimestamp(note.timestamp)} </p> </div> ))} </div> <div> <Label htmlFor="newTaskNote">Add a Note</Label> <Textarea id="newTaskNote" name="newTaskNote" rows="3" value={newTaskNote} onChange={handleTaskNoteChange} placeholder="Type your note here..." /> <Button type="button" variant="secondary" size="sm" className="mt-2" onClick={handleAddTaskNote} disabled={!newTaskNote.trim() || !canManage} title={!canManage ? "Admin or Owner role required" : ""}> Add Note </Button> </div> </div> )}
                     <div className="mt-6 flex justify-end space-x-3 border-t pt-4"> <Button type="button" variant="secondary" onClick={closeModal}>Cancel</Button> <Button type="submit" disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""}>{editingTask ? "Update Task" : "Add Task"}</Button> </div>
                 </form>
             </Modal>
@@ -1517,12 +1923,12 @@ const AddUserModal = ({ isOpen, onClose, onSaveUser, userRole }) => {
     const [name, setName] = useState('');
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
-    const [role, setRole] = useState(USER_ROLES[USER_ROLES.length - 1]); // Default to 'Rep'
+    const [role, setRole] = useState(USER_ROLES[USER_ROLES.length - 1]); 
     const [error, setError] = useState(null);
     const [isLoading, setIsLoading] = useState(false);
 
     useEffect(() => {
-        if (isOpen) { // Reset form on open
+        if (isOpen) { 
             setName('');
             setEmail('');
             setPassword('');
@@ -1538,9 +1944,8 @@ const AddUserModal = ({ isOpen, onClose, onSaveUser, userRole }) => {
         setIsLoading(true);
         try {
             await onSaveUser({ name, email, password, role });
-            // Parent (UsersPage) is responsible for closing the modal on success
         } catch (err) {
-            setError(getAxiosErrorMessage(err)); // Use helper for axios error
+            setError(getAxiosErrorMessage(err)); 
         } finally {
             setIsLoading(false);
         }
@@ -1576,7 +1981,7 @@ const AddUserModal = ({ isOpen, onClose, onSaveUser, userRole }) => {
 const EditUserModal = ({ isOpen, onClose, onSaveUser, editingUser, userRole }) => {
     const [name, setName] = useState('');
     const [email, setEmail] = useState('');
-    const [password, setPassword] = useState(''); // Optional: for changing password
+    const [password, setPassword] = useState(''); 
     const [role, setRole] = useState('');
     const [error, setError] = useState(null);
     const [isLoading, setIsLoading] = useState(false);
@@ -1586,7 +1991,7 @@ const EditUserModal = ({ isOpen, onClose, onSaveUser, editingUser, userRole }) =
             setName(editingUser.name || '');
             setEmail(editingUser.email || '');
             setRole(editingUser.role || USER_ROLES[USER_ROLES.length - 1]);
-            setPassword(''); // Clear password field each time
+            setPassword(''); 
             setError(null);
             setIsLoading(false);
         }
@@ -1597,14 +2002,13 @@ const EditUserModal = ({ isOpen, onClose, onSaveUser, editingUser, userRole }) =
         setError(null);
         setIsLoading(true);
         const updatedData = { name, email, role };
-        if (password) { // Only include password if user entered something
+        if (password) { 
             updatedData.password = password;
         }
         try {
             await onSaveUser(editingUser.id, updatedData);
-            // Parent (UsersPage) is responsible for closing the modal on success
         } catch (err) {
-            setError(getAxiosErrorMessage(err)); // Use helper for axios error
+            setError(getAxiosErrorMessage(err)); 
         } finally {
             setIsLoading(false);
         }
@@ -1675,7 +2079,7 @@ const UsersPage = ({ userRole, users, setUsers }) => {
             setIsAddUserModalOpen(false); 
         } catch (err) {
             console.error("Failed to save user:", err);
-            throw err; // Re-throw for modal to display
+            throw err; 
         }
     };
 
@@ -1688,7 +2092,7 @@ const UsersPage = ({ userRole, users, setUsers }) => {
             setCurrentUserToEdit(null);
         } catch (err) {
             console.error("Failed to update user:", err);
-            throw err; // Re-throw for modal to display
+            throw err; 
         }
     };
     
@@ -1805,79 +2209,40 @@ const Sidebar = ({ currentPage, navigate, currentUser, onRoleChange }) => {
         { name: 'Contacts', icon: UsersIcon, page: 'contacts' },
         { name: 'Deals', icon: DollarSignIcon, page: 'deals' },
         { name: 'Tasks', icon: CheckSquareIcon, page: 'tasks' },
-        { name: 'Users', icon: UserCogIcon, page: 'users' }, // Added Users item
+        { name: 'Users', icon: UserCogIcon, page: 'users' }, 
     ];
     return ( <div className="w-64 h-screen bg-gray-800 text-white flex flex-col fixed"> <div className="p-4 text-xl font-bold border-b border-gray-700">MVP CRM</div> <nav className="flex-1 p-4 space-y-2"> {navItems.map((item) => ( <button key={item.page} onClick={() => navigate(item.page)} className={`w-full flex items-center px-3 py-2 rounded-md text-sm font-medium ${ currentPage === item.page ? 'bg-gray-900 text-white' : 'text-gray-300 hover:bg-gray-700 hover:text-white' }`}> <item.icon className="mr-3 h-5 w-5" /> {item.name} </button> ))} </nav> <div className="p-4 border-t border-gray-700 space-y-3"> <div className="text-sm text-gray-300 truncate" title={currentUser.name}> Logged in as: <span className="font-medium">{currentUser.name}</span> </div> <div className="flex items-center space-x-2"> <UserCogIcon className="h-5 w-5 text-gray-400 flex-shrink-0" /> <select value={currentUser.role} onChange={(e) => onRoleChange(e.target.value)} className="w-full bg-gray-700 border border-gray-600 rounded-md px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 appearance-none text-ellipsis overflow-hidden whitespace-nowrap" title="Simulate User Role"> {USER_ROLES.map(role => ( <option key={role} value={role}>{role}</option> ))} </select> </div> <button onClick={() => navigate('login')} className="w-full flex items-center px-3 py-2 rounded-md text-sm font-medium text-gray-300 hover:bg-gray-700 hover:text-white"> <LogOutIcon className="mr-3 h-5 w-5" /> Logout (Simulated) </button> </div> </div> );
 };
 
 // Main Layout Component
 const DashboardLayout = ({ currentPage, navigate, currentUser, onRoleChange, children }) => {
-    // Pass userRole down to children automatically
     return ( <div className="flex"> <Sidebar currentPage={currentPage} navigate={navigate} currentUser={currentUser} onRoleChange={onRoleChange} /> <main className="flex-1 ml-64 bg-gray-50 min-h-screen"> {React.Children.map(children, child => { if (React.isValidElement(child)) { return React.cloneElement(child, { userRole: currentUser.role }); } return child; })} </main> </div> );
 };
 
 // Simulated Login Screen
-const LoginScreen = ({ onLogin }) => { /* ... same as before ... */ return ( <div className="min-h-screen flex items-center justify-center bg-gray-100"> <Card className="w-full max-w-sm"> <CardHeader> <CardTitle>CRM Login</CardTitle> <CardDescription>Enter credentials to access the MVP.</CardDescription> </CardHeader> <CardContent className="space-y-4"> <div> <Label htmlFor="email">Email</Label> <Input id="email" type="email" placeholder="user@example.com" defaultValue="test@example.com" /> </div> <div> <Label htmlFor="password">Password</Label> <Input id="password" type="password" defaultValue="password" /> </div> </CardContent> <CardFooter> <Button className="w-full" onClick={onLogin}> Login (Simulated) </Button> </CardFooter> </Card> </div> ); };
+const LoginScreen = ({ onLogin }) => { return ( <div className="min-h-screen flex items-center justify-center bg-gray-100"> <Card className="w-full max-w-sm"> <CardHeader> <CardTitle>CRM Login</CardTitle> <CardDescription>Enter credentials to access the MVP.</CardDescription> </CardHeader> <CardContent className="space-y-4"> <div> <Label htmlFor="email">Email</Label> <Input id="email" type="email" placeholder="user@example.com" defaultValue="test@example.com" /> </div> <div> <Label htmlFor="password">Password</Label> <Input id="password" type="password" defaultValue="password" /> </div> </CardContent> <CardFooter> <Button className="w-full" onClick={onLogin}> Login (Simulated) </Button> </CardFooter> </Card> </div> ); };
 
 // App Component (Main Router)
 function App() {
   const [currentPage, setCurrentPage] = useState('login');
   const [currentUser, setCurrentUser] = useState(mockUsers.find(u => u.role === 'Owner') || { name: 'Owner User', email: 'owner@example.com', role: 'Owner' });
 
-  // Lifted state for shared data
-  const [contacts, setContacts] = useState([]); // Initialize as empty, will be fetched by ContactsPage
-  const [deals, setDeals] = useState(initialDeals);
+  const [contacts, setContacts] = useState([]); 
+  const [deals, setDeals] = useState({}); 
   const [tasks, setTasks] = useState(initialTasks);
-  const [users, setUsers] = useState(mockUsers); // UsersPage will fetch, but good to have mock for fallback/initial
+  const [users, setUsers] = useState(mockUsers); 
 
-  // --- Handlers passed down to DealsPage ---
-  const handleAddDealNote = useCallback((dealId, noteContent) => { /* ... (same as before, uses setDeals) ... */ const noteToAdd = { id: `dn${Date.now()}`, content: noteContent, timestamp: new Date().toISOString(), author: 'You' }; setDeals(prevDeals => { const updatedDeals = { ...prevDeals }; for (const stage in updatedDeals) { const dealIndex = updatedDeals[stage].findIndex(d => d.id === dealId); if (dealIndex !== -1) { const currentNotes = updatedDeals[stage][dealIndex].notes || []; const updatedDeal = { ...updatedDeals[stage][dealIndex], notes: [...currentNotes, noteToAdd] }; const updatedStageDeals = [...updatedDeals[stage]]; updatedStageDeals[dealIndex] = updatedDeal; updatedDeals[stage] = updatedStageDeals; break; } } return updatedDeals; }); }, [setDeals]);
-  const handleAddDealSubmission = useCallback((dealId, submissionData) => { /* ... (same as before, uses setDeals) ... */ const newSubmission = { id: `s${Date.now()}`, ...submissionData, status: 'Submitted', approval_date: null, approval_amount: null, approval_term: null, approval_rate: null, stipulations: null, approval_link: null, decline_reason: null }; setDeals(prevDeals => { const updatedDeals = { ...prevDeals }; for (const stage in updatedDeals) { const dealIndex = updatedDeals[stage].findIndex(d => d.id === dealId); if (dealIndex !== -1) { const currentSubmissions = updatedDeals[stage][dealIndex].submissions || []; const updatedDeal = { ...updatedDeals[stage][dealIndex], submissions: [...currentSubmissions, newSubmission] }; const updatedStageDeals = [...updatedDeals[stage]]; updatedStageDeals[dealIndex] = updatedDeal; updatedDeals[stage] = updatedStageDeals; break; } } return updatedDeals; }); console.log("Simulating Add Submission:", newSubmission, "to Deal ID:", dealId); }, [setDeals]);
-  const handleSaveApproval = useCallback((dealId, submissionId, approvalData) => { /* ... (same as before, uses setDeals) ... */ setDeals(prevDeals => { const updatedDeals = { ...prevDeals }; for (const stage in updatedDeals) { const dealIndex = updatedDeals[stage].findIndex(d => d.id === dealId); if (dealIndex !== -1) { const submissionIndex = (updatedDeals[stage][dealIndex].submissions || []).findIndex(s => s.id === submissionId); if (submissionIndex !== -1) { const updatedSubmission = { ...(updatedDeals[stage][dealIndex].submissions[submissionIndex]), ...approvalData, status: 'Approved', decline_reason: null }; const updatedSubmissions = [...(updatedDeals[stage][dealIndex].submissions || [])]; updatedSubmissions[submissionIndex] = updatedSubmission; const updatedDeal = { ...updatedDeals[stage][dealIndex], submissions: updatedSubmissions }; const updatedStageDeals = [...updatedDeals[stage]]; updatedStageDeals[dealIndex] = updatedDeal; updatedDeals[stage] = updatedStageDeals; break; } } } return updatedDeals; }); console.log("Simulating Save Approval for Submission ID:", submissionId, "Data:", approvalData); }, [setDeals]);
-  const handleUpdateSubmissionStatus = useCallback((dealId, submissionId, newStatus, declineReason = null) => { /* ... (same as before, uses setDeals) ... */ setDeals(prevDeals => { const updatedDeals = { ...prevDeals }; for (const stage in updatedDeals) { const dealIndex = updatedDeals[stage].findIndex(d => d.id === dealId); if (dealIndex !== -1) { const submissionIndex = (updatedDeals[stage][dealIndex].submissions || []).findIndex(s => s.id === submissionId); if (submissionIndex !== -1) { const updatedSubmission = { ...(updatedDeals[stage][dealIndex].submissions[submissionIndex]), status: newStatus }; if (newStatus === 'Declined') { updatedSubmission.decline_reason = declineReason; } else { updatedSubmission.decline_reason = null; } if (newStatus !== 'Approved') { updatedSubmission.approval_date = null; updatedSubmission.approval_amount = null; updatedSubmission.approval_term = null; updatedSubmission.approval_rate = null; updatedSubmission.stipulations = null; updatedSubmission.approval_link = null; } const updatedSubmissions = [...(updatedDeals[stage][dealIndex].submissions || [])]; updatedSubmissions[submissionIndex] = updatedSubmission; const updatedDeal = { ...updatedDeals[stage][dealIndex], submissions: updatedSubmissions }; const updatedStageDeals = [...updatedDeals[stage]]; updatedStageDeals[dealIndex] = updatedDeal; updatedDeals[stage] = updatedStageDeals; break; } } } return updatedDeals; }); console.log(`Simulating Update Submission ${submissionId} Status to: ${newStatus}`, declineReason ? `Reason: ${declineReason}` : ''); }, [setDeals]);
+  const allDealsFlat = useMemo(() => {
+    return Object.values(deals).flat();
+  }, [deals]);
 
-  // SIMPLIFIED handleSaveDealChanges - only updates data within the current stage
-  const handleSaveDealChanges = useCallback((dealId, updatedData) => {
-        setDeals(prevDeals => {
-            const updatedDeals = { ...prevDeals };
-            let dealFound = false;
-
-            // Find the deal and update it in place
-            for (const stage in updatedDeals) {
-                const dealIndex = updatedDeals[stage].findIndex(d => d.id === dealId);
-                if (dealIndex !== -1) {
-                    // Combine existing deal data with updated form data
-                    const updatedDeal = {
-                        ...updatedDeals[stage][dealIndex], // Keep existing fields like notes, submissions, contactIds
-                        ...updatedData, // Overwrite with form data
-                        value: parseFloat(updatedData.value) || 0, // Ensure value is number
-                    };
-                    // Important: Create new array for the stage to trigger re-render
-                    const updatedStageDeals = [...updatedDeals[stage]];
-                    updatedStageDeals[dealIndex] = updatedDeal;
-                    updatedDeals[stage] = updatedStageDeals;
-                    dealFound = true;
-                    break; // Exit loop once found
-                }
-            }
-
-            if (!dealFound) {
-                 console.error("Deal not found for saving changes:", dealId);
-            }
-
-            return updatedDeals;
-        });
-        console.log("Simulating Save Deal Changes for ID:", dealId, "Data:", updatedData);
-    }, [setDeals]); // Dependency on setDeals
-  // --- End Handlers for DealsPage ---
-
-
+  // Removed Submission Handlers from App.jsx as they are now in DealsPage
+  
   const handleLogin = useCallback(() => {
       console.log("Simulating successful login...");
-      // Ensure currentUser has email from the updated mockUsers
       const ownerUser = mockUsers.find(u => u.role === 'Owner') || { name: 'Owner User', email: 'owner@example.com', role: 'Owner' };
       setCurrentUser(ownerUser);
-      setCurrentPage('dashboard'); // Default to dashboard after login
+      setCurrentPage('dashboard'); 
   }, []);
 
   const navigate = useCallback((page) => {
@@ -1894,7 +2259,6 @@ function App() {
 
   if (currentPage === 'login' || !currentUser) { return <LoginScreen onLogin={handleLogin} />; }
 
-  // Pass relevant state and handlers down to the current page component
   return (
     <DashboardLayout currentPage={currentPage} navigate={navigate} currentUser={currentUser} onRoleChange={handleRoleChange}>
         {currentPage === 'dashboard' && <DashboardPage contacts={contacts} deals={deals} tasks={tasks} />}
@@ -1904,12 +2268,8 @@ function App() {
                 userRole={currentUser.role}
                 deals={deals}
                 setDeals={setDeals}
-                availableContacts={contacts} // Pass contacts here
-                handleSaveDealChanges={handleSaveDealChanges}
-                handleAddDealSubmission={handleAddDealSubmission}
-                handleUpdateSubmissionStatus={handleUpdateSubmissionStatus}
-                handleSaveApproval={handleSaveApproval}
-                // handleAddDealNote is now internal to DealsPage for managing its own notes state
+                availableContacts={contacts}
+                // Removed old submission handlers from App.jsx props
             />
         )}
         {currentPage === 'tasks' && <TasksPage userRole={currentUser.role} tasks={tasks} setTasks={setTasks} />}
@@ -1918,8 +2278,15 @@ function App() {
   );
 }
 
-export default App;
+// Add a static property to App for shared state context if needed elsewhere (though not strictly necessary for this structure)
+App.useSharedState = () => ({
+    allUsers: App.globalUsers || mockUsers, // Fallback, will be updated by UsersPage
+});
+App.setGlobalUsers = (users) => {
+    App.globalUsers = users;
+};
 
-[end of frontend/src/components/CrmApp.jsx]
+
+export default App;
 
 [end of frontend/src/components/CrmApp.jsx]
