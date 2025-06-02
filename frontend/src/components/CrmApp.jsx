@@ -106,7 +106,7 @@ const Modal = ({ isOpen, onClose, title, children }) => { /* ... */ if (!isOpen)
 
 // --- Helper Functions ---
 const formatTimestamp = (isoString) => { if (!isoString) return ''; try { return new Date(isoString).toLocaleString(); } catch (e) { return 'Invalid Date'; } };
-const getOwnerName = (ownerId, users) => { if (!ownerId) return <span className="text-gray-500 italic">Unassigned</span>; const owner = users.find(user => user.id === ownerId); return owner ? owner.name : <span className="text-red-500 italic">Unknown User</span>; };
+const getOwnerName = (ownerId, users) => { if (!ownerId) return <span className="text-gray-500 italic">Unassigned</span>; const userList = users || mockUsers; /* Fallback for initial load or if prop not passed */ const owner = userList.find(user => user.id === ownerId); return owner ? owner.name : <span className="text-red-500 italic">Unknown User</span>; };
 const getContactNameDisplay = (contactIds, contacts) => {
     if (!contactIds || contactIds.length === 0) return <span className="text-gray-500 italic">N/A</span>;
     const firstContactId = contactIds[0];
@@ -254,121 +254,233 @@ const DashboardPage = ({ contacts = [], deals = {}, tasks = [] }) => {
 
 
 // Contacts Page Component (now receives props from App)
-const ContactsPage = ({ userRole, contacts, setContacts, allDealsFlat }) => {
-    // Removed useState for contacts
-    const [isAddContactModalOpen, setIsAddContactModalOpen] = useState(false); // Renamed for clarity
-    const [isImportModalOpen, setIsImportModalOpen] = useState(false); // State for import modal
+const ContactsPage = ({ userRole, contacts, setContacts, allDealsFlat, allUsers }) => {
+    const [isAddContactModalOpen, setIsAddContactModalOpen] = useState(false);
+    const [isImportModalOpen, setIsImportModalOpen] = useState(false);
     const [editingContact, setEditingContact] = useState(null);
-    // Updated initial state to include new fields
     const [formData, setFormData] = useState({ firstName: '', lastName: '', email: '', phone: '', mobilePhone: '', officePhone: '', otherPhone: '', company: '', tags: '', lead_status: 'New', ownerId: null, contactType: CONTACT_TYPES[0], businessAddress: '', businessCity: '', businessZip: '', notes: [] });
     const [newNote, setNewNote] = useState('');
     const [searchTerm, setSearchTerm] = useState('');
     const [associatedDeals, setAssociatedDeals] = useState([]);
 
+    const [contactsLoading, setContactsLoading] = useState(true);
+    const [contactsError, setContactsError] = useState(null); // For page-level errors (e.g. initial fetch)
+    const [contactsActionError, setContactsActionError] = useState(null); // For specific action errors (e.g. delete)
+    const [modalIsLoading, setModalIsLoading] = useState(false);
+    const [modalError, setModalError] = useState(null); // For errors within the Add/Edit modal
+    const [deletingContactId, setDeletingContactId] = useState(null);
+
+    const [modalNotesLoading, setModalNotesLoading] = useState(false);
+    const [modalNotesError, setModalNotesError] = useState(null);
+    const [noteSubmissionLoading, setNoteSubmissionLoading] = useState(false);
+
+
     const canManage = userRole === 'Admin' || userRole === 'Owner';
-    const availableOwners = useMemo(() => mockUsers.filter(u => u.role === 'Admin' || u.role === 'Rep' || u.role === 'Owner'), []);
+    const availableOwners = useMemo(() => (allUsers || []).filter(u => u.role === 'Admin' || u.role === 'Rep' || u.role === 'Owner'), [allUsers]);
+    
+    useEffect(() => {
+        const fetchContacts = async () => {
+            try {
+                setContactsLoading(true);
+                setContactsError(null);
+                setContactsActionError(null);
+                const response = await axios.get('/contacts');
+                setContacts(response.data);
+            } catch (err) {
+                console.error("Failed to fetch contacts:", err);
+                setContactsError(getAxiosErrorMessage(err));
+                setContacts([]); 
+            } finally {
+                setContactsLoading(false);
+            }
+        };
+        fetchContacts();
+    }, [setContacts]);
+
 
     // --- Event Handlers ---
     const handleInputChange = (e) => { const { name, value } = e.target; setFormData(prev => ({ ...prev, [name]: value })); };
     const handleNoteChange = (e) => { setNewNote(e.target.value); };
-    // Updated handleAddNote to use setContacts prop
-    const handleAddNote = () => {
+    
+    const handleAddNote = async () => {
         if (!newNote.trim() || !editingContact) return;
-        const noteToAdd = { id: `n${Date.now()}`, content: newNote, timestamp: new Date().toISOString(), author: 'You' };
-        setFormData(prev => ({ ...prev, notes: [...prev.notes, noteToAdd] }));
-        setContacts(prevContacts => prevContacts.map(contact =>
-            contact.id === editingContact.id
-                ? { ...contact, notes: [...(contact.notes || []), noteToAdd] }
-                : contact
-        ));
-        console.log("Simulating Add Note:", noteToAdd, "to Contact ID:", editingContact.id);
-        setNewNote('');
+        setModalNotesError(null);
+        setNoteSubmissionLoading(true);
+        try {
+            const response = await axios.post('/notes', { content: newNote, contactId: editingContact.id });
+            const newNoteData = response.data;
+            setFormData(prevFormData => ({
+                ...prevFormData,
+                notes: [...(prevFormData.notes || []), newNoteData]
+            }));
+            setNewNote('');
+        } catch (err) {
+            console.error("Failed to add note:", err);
+            setModalNotesError(getAxiosErrorMessage(err));
+        } finally {
+            setNoteSubmissionLoading(false);
+        }
     };
 
-    const openAddContactModal = (contact = null) => { // Renamed for clarity
+    const openAddContactModal = async (contact = null) => { 
+        setModalError(null); 
+        setContactsActionError(null);
+        setModalNotesError(null);
         setNewNote('');
-        if (contact) {
+
+        if (contact) { // Editing existing contact
             setEditingContact(contact);
+            // Initialize with basic contact data; notes will be fetched
             setFormData({
                 ...contact,
-                firstName: contact.firstName || '', lastName: contact.lastName || '', tags: contact.tags.join(', '),
-                lead_status: contact.lead_status || 'New', ownerId: contact.ownerId || null, notes: contact.notes || [],
+                firstName: contact.firstName || '', lastName: contact.lastName || '', 
+                tags: Array.isArray(contact.tags) ? contact.tags.join(', ') : '',
+                lead_status: contact.lead_status || 'New', ownerId: contact.ownerId || '', 
                 mobilePhone: contact.mobilePhone || '', officePhone: contact.officePhone || '', otherPhone: contact.otherPhone || '',
                 contactType: contact.contactType || CONTACT_TYPES[0], businessAddress: contact.businessAddress || '',
                 businessCity: contact.businessCity || '', businessZip: contact.businessZip || '',
+                notes: [], // Initialize as empty, then fetch
             });
+            setIsAddContactModalOpen(true); // Open modal first
+
+            setModalNotesLoading(true);
+            try {
+                const notesResponse = await axios.get(`/notes?contactId=${contact.id}`);
+                setFormData(prevFormData => ({ ...prevFormData, notes: notesResponse.data || [] }));
+            } catch (err) {
+                console.error("Failed to fetch notes for contact:", err);
+                setModalNotesError(getAxiosErrorMessage(err));
+                setFormData(prevFormData => ({ ...prevFormData, notes: contact.notes || [] })); // Fallback to original notes if fetch fails
+            } finally {
+                setModalNotesLoading(false);
+            }
+
             const dealsForContact = allDealsFlat.filter(deal => deal.contactIds && deal.contactIds.includes(contact.id));
             setAssociatedDeals(dealsForContact);
-        } else {
+        } else { // Adding new contact
             setEditingContact(null);
-            setFormData({ firstName: '', lastName: '', email: '', phone: '', mobilePhone: '', officePhone: '', otherPhone: '', company: '', tags: '', lead_status: 'New', ownerId: null, contactType: CONTACT_TYPES[0], businessAddress: '', businessCity: '', businessZip: '', notes: [] });
+            setFormData({ firstName: '', lastName: '', email: '', phone: '', mobilePhone: '', officePhone: '', otherPhone: '', company: '', tags: '', lead_status: 'New', ownerId: '', contactType: CONTACT_TYPES[0], businessAddress: '', businessCity: '', businessZip: '', notes: [] });
             setAssociatedDeals([]);
+            setIsAddContactModalOpen(true); 
         }
-        setIsAddContactModalOpen(true); // Use correct state setter
     };
-    const closeAddContactModal = () => { setIsAddContactModalOpen(false); setEditingContact(null); setAssociatedDeals([]); }; // Renamed
+    const closeAddContactModal = () => { setIsAddContactModalOpen(false); setEditingContact(null); setAssociatedDeals([]); setModalError(null); setModalNotesError(null);}; 
 
-    // Handlers for Import Modal
     const openImportModal = () => setIsImportModalOpen(true);
     const closeImportModal = () => setIsImportModalOpen(false);
 
-    // Updated handleSubmit to use setContacts prop
-    const handleSubmit = (e) => {
+    const handleSubmit = async (e) => {
         e.preventDefault();
-        const updatedContactData = {
-            id: editingContact ? editingContact.id : `c${Date.now()}`,
-            firstName: formData.firstName, lastName: formData.lastName, email: formData.email, phone: formData.phone,
-            mobilePhone: formData.mobilePhone, officePhone: formData.officePhone, otherPhone: formData.otherPhone,
-            company: formData.company, tags: formData.tags.split(',').map(tag => tag.trim()).filter(tag => tag),
-            lead_status: formData.lead_status, ownerId: formData.ownerId, contactType: formData.contactType,
-            businessAddress: formData.businessAddress, businessCity: formData.businessCity, businessZip: formData.businessZip,
-            notes: formData.notes
+        setModalIsLoading(true);
+        setModalError(null);
+        setContactsActionError(null);
+
+
+        let ownerIdToSend = formData.ownerId;
+        if (ownerIdToSend === '') {
+            ownerIdToSend = null;
+        }
+
+        const contactPayload = {
+            firstName: formData.firstName,
+            lastName: formData.lastName,
+            email: formData.email,
+            phone: formData.phone || null,
+            mobilePhone: formData.mobilePhone || null,
+            officePhone: formData.officePhone || null,
+            otherPhone: formData.otherPhone || null,
+            company: formData.company || null,
+            tags: formData.tags.split(',').map(tag => tag.trim()).filter(tag => tag),
+            lead_status: formData.lead_status,
+            ownerId: ownerIdToSend,
+            contactType: formData.contactType,
+            businessAddress: formData.businessAddress || null,
+            businessCity: formData.businessCity || null,
+            businessZip: formData.businessZip || null,
         };
+        // Notes are NOT sent with contact create/update anymore. They are managed separately.
+        
         if (editingContact) {
-            setContacts(prev => prev.map(c => c.id === editingContact.id ? updatedContactData : c));
-            console.log("Simulating Update Contact Fields:", updatedContactData);
+            try {
+                const response = await axios.patch(`/contacts/${editingContact.id}`, contactPayload);
+                // Update contact in list, but keep existing notes from formData if they were successfully fetched/updated
+                // as PATCH /contacts/:id might not return notes.
+                const updatedContact = { ...response.data, notes: formData.notes };
+                setContacts(prev => prev.map(c => c.id === editingContact.id ? updatedContact : c));
+                closeAddContactModal();
+            } catch (err) {
+                console.error("Failed to update contact:", err);
+                setModalError(getAxiosErrorMessage(err));
+            } finally {
+                setModalIsLoading(false);
+            }
         } else {
-            setContacts(prev => [...prev, updatedContactData]);
-            console.log("Simulating Add Contact:", updatedContactData);
+            // Create new contact
+            try {
+                const response = await axios.post('/contacts', contactPayload);
+                setContacts(prevContacts => [...prevContacts, response.data]); // New contact won't have notes from this response
+                closeAddContactModal();
+            } catch (err) {
+                console.error("Failed to create contact:", err);
+                setModalError(getAxiosErrorMessage(err));
+            } finally {
+                setModalIsLoading(false);
+            }
         }
-        closeAddContactModal(); // Use correct closer
     };
-    // Updated handleDelete to use setContacts prop
-    const handleDelete = (contactId) => {
-        if (window.confirm("Are you sure you want to delete this contact?")) {
-            setContacts(prev => prev.filter(c => c.id !== contactId));
-            console.log("Simulating Delete Contact:", contactId);
+    
+    const handleDelete = async (contactId, contactName) => {
+        setContactsActionError(null);
+        if (window.confirm(`Are you sure you want to delete contact: ${contactName}? This action cannot be undone.`)) {
+            setDeletingContactId(contactId);
+            try {
+                await axios.delete(`/contacts/${contactId}`);
+                setContacts(prevContacts => prevContacts.filter(c => c.id !== contactId));
+            } catch (err) {
+                console.error("Failed to delete contact:", err);
+                const message = getAxiosErrorMessage(err);
+                setContactsActionError(message);
+                alert(`Error deleting contact: ${message}`);
+            } finally {
+                setDeletingContactId(null);
+            }
         }
     };
 
-    // Filter contacts based on search term
-    const filteredContacts = useMemo(() => { /* ... (no changes needed here) ... */ const lowerCaseSearchTerm = searchTerm.toLowerCase(); if (!lowerCaseSearchTerm) { return contacts; } return contacts.filter(contact => (contact.firstName.toLowerCase() + ' ' + contact.lastName.toLowerCase()).includes(lowerCaseSearchTerm) || contact.email.toLowerCase().includes(lowerCaseSearchTerm) || contact.company.toLowerCase().includes(lowerCaseSearchTerm) ); }, [contacts, searchTerm]);
+    const filteredContacts = useMemo(() => { 
+        const lowerCaseSearchTerm = searchTerm.toLowerCase(); 
+        if (!lowerCaseSearchTerm) { return contacts; } 
+        return contacts.filter(contact => 
+            (contact.firstName?.toLowerCase() || '').includes(lowerCaseSearchTerm) || 
+            (contact.lastName?.toLowerCase() || '').includes(lowerCaseSearchTerm) || 
+            (contact.email?.toLowerCase() || '').includes(lowerCaseSearchTerm) || 
+            (contact.company?.toLowerCase() || '').includes(lowerCaseSearchTerm) 
+        ); 
+    }, [contacts, searchTerm]);
 
-    // Function to handle clicking the name to edit
-    const handleNameClick = (contact) => { if (canManage) { openAddContactModal(contact); } }; // Use correct opener
-
-    // Placeholder function for clicking a deal name
+    const handleNameClick = (contact) => { if (canManage) { openAddContactModal(contact); } }; 
     const handleDealClick = (dealId) => { console.log("Navigate to or open modal for Deal ID:", dealId); alert(`Simulating opening deal details for ID: ${dealId}\n(Actual navigation/modal opening requires more complex state management)`); };
+
+    if (contactsLoading) return <div className="p-6 text-center">Loading contacts...</div>;
 
     return (
         <div className="p-6">
-             {/* Header: Title, Search, Add/Import Buttons */}
              <div className="flex flex-col sm:flex-row justify-between sm:items-center mb-6 gap-4">
                 <h1 className="text-2xl font-semibold">Contacts</h1>
-                 <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto"> {/* Group buttons */}
+                 <div className="flex flex-col sm:flex-row gap-2 w-full sm:w-auto"> 
                     <div className="relative w-full sm:w-64"> <Input type="text" placeholder="Search contacts..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="pl-10" /> <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none"> <SearchIcon className="text-gray-400" /> </div> </div>
-                    {/* Import Button */}
                     <Button onClick={openImportModal} variant="outline" className="w-full sm:w-auto" disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""}>
                         <UploadCloudIcon className="mr-2 h-4 w-4" /> Import Leads
                     </Button>
-                    {/* Add Contact Button */}
                     <Button onClick={() => openAddContactModal()} className="w-full sm:w-auto" disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""}>
                         <PlusIcon className="mr-2" /> Add Contact
                     </Button>
                 </div>
              </div>
+             {contactsError && <p className="text-red-500 text-sm mb-3 bg-red-100 p-3 rounded-md">Error fetching contacts: {contactsError}</p>}
+             {contactsActionError && <p className="text-red-500 text-sm mb-3 bg-red-100 p-3 rounded-md">Action Error: {contactsActionError}</p>}
 
-             {/* Contacts Table Card */}
+
              <Card>
                  <CardContent>
                      <Table>
@@ -388,62 +500,92 @@ const ContactsPage = ({ userRole, contacts, setContacts, allDealsFlat }) => {
                              {filteredContacts.length > 0 ? (
                                  filteredContacts.map((contact) => (
                                      <TableRow key={contact.id}>
-                                         <TableCell className="font-medium"> <button onClick={() => handleNameClick(contact)} className={`text-blue-600 hover:underline disabled:text-gray-500 disabled:no-underline disabled:cursor-not-allowed`} disabled={!canManage} title={canManage ? "Edit Contact" : "Admin or Owner role required"}> {contact.firstName} </button> </TableCell>
-                                         <TableCell> <button onClick={() => handleNameClick(contact)} className={`text-blue-600 hover:underline disabled:text-gray-500 disabled:no-underline disabled:cursor-not-allowed`} disabled={!canManage} title={canManage ? "Edit Contact" : "Admin or Owner role required"}> {contact.lastName} </button> </TableCell>
+                                         <TableCell className="font-medium"> <button onClick={() => handleNameClick(contact)} className={`text-blue-600 hover:underline disabled:text-gray-500 disabled:no-underline disabled:cursor-not-allowed`} disabled={!canManage || deletingContactId === contact.id} title={canManage ? "Edit Contact" : "Admin or Owner role required"}> {contact.firstName} </button> </TableCell>
+                                         <TableCell> <button onClick={() => handleNameClick(contact)} className={`text-blue-600 hover:underline disabled:text-gray-500 disabled:no-underline disabled:cursor-not-allowed`} disabled={!canManage || deletingContactId === contact.id} title={canManage ? "Edit Contact" : "Admin or Owner role required"}> {contact.lastName} </button> </TableCell>
                                          <TableCell> <span className={`px-2 py-0.5 rounded text-xs font-medium ${getStatusBadgeColor(contact.lead_status)}`}> {contact.lead_status || 'N/A'} </span> </TableCell>
                                          <TableCell>{contact.email}</TableCell>
                                          <TableCell>{contact.company}</TableCell>
-                                         <TableCell>{getOwnerName(contact.ownerId, mockUsers)}</TableCell>
-                                         <TableCell> {contact.tags.map(tag => ( <span key={tag} className="mr-1 mb-1 inline-block px-2 py-0.5 rounded bg-blue-100 text-blue-800 text-xs font-medium"> {tag} </span> ))} </TableCell>
-                                         <TableCell> <Button variant="ghost" size="sm" className="mr-2" onClick={() => openAddContactModal(contact)} disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""}> <EditIcon /> </Button> <Button variant="ghost" size="sm" className="text-red-600 hover:text-red-700" onClick={() => handleDelete(contact.id)} disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""}> <TrashIcon /> </Button> </TableCell>
+                                         <TableCell>{getOwnerName(contact.ownerId, allUsers)}</TableCell>
+                                         <TableCell> {(contact.tags || []).map(tag => ( <span key={tag} className="mr-1 mb-1 inline-block px-2 py-0.5 rounded bg-blue-100 text-blue-800 text-xs font-medium"> {tag} </span> ))} </TableCell>
+                                         <TableCell> 
+                                            <Button variant="ghost" size="sm" className="mr-2" onClick={() => openAddContactModal(contact)} disabled={!canManage || deletingContactId === contact.id} title={!canManage ? "Admin or Owner role required" : "Edit Contact"}> <EditIcon /> </Button> 
+                                            <Button variant="ghost" size="sm" className="text-red-600 hover:text-red-700" 
+                                                onClick={() => handleDelete(contact.id, `${contact.firstName} ${contact.lastName}`)} 
+                                                disabled={!canManage || deletingContactId === contact.id} 
+                                                title={!canManage ? "Admin or Owner role required" : (deletingContactId === contact.id ? "Deleting..." : "Delete Contact")}> 
+                                                {deletingContactId === contact.id ? "..." : <TrashIcon />}
+                                            </Button> 
+                                        </TableCell>
                                      </TableRow>
                                  ))
-                             ) : ( <TableRow> <TableCell colSpan="8" className="text-center text-gray-500 py-4"> No contacts found{searchTerm ? ' matching your search' : ''}. </TableCell> </TableRow> )}
+                             ) : ( <TableRow> <TableCell colSpan="8" className="text-center text-gray-500 py-4"> No contacts found{searchTerm ? ' matching your search' : (contactsError ? '' : '.')}. </TableCell> </TableRow> )}
                          </TableBody>
                      </Table>
                  </CardContent>
              </Card>
 
-             {/* Add/Edit Contact Modal */}
              <Modal isOpen={isAddContactModalOpen} onClose={closeAddContactModal} title={editingContact ? "Edit Contact" : "Add New Contact"}>
                  <form onSubmit={handleSubmit}>
-                     {/* Contact Fields - Updated grid layout */}
+                     {modalError && <p className="text-red-500 text-sm mb-3 bg-red-100 p-2 rounded-md">{modalError}</p>}
                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                         {/* Row 1 */}
                          <div> <Label htmlFor="firstName">First Name</Label> <Input id="firstName" name="firstName" value={formData.firstName} onChange={handleInputChange} required /> </div>
                          <div> <Label htmlFor="lastName">Last Name</Label> <Input id="lastName" name="lastName" value={formData.lastName} onChange={handleInputChange} required /> </div>
-                         {/* Row 2 */}
                          <div> <Label htmlFor="email">Email</Label> <Input id="email" name="email" type="email" value={formData.email} onChange={handleInputChange} required /> </div>
                          <div> <Label htmlFor="company">Company</Label> <Input id="company" name="company" value={formData.company} onChange={handleInputChange} /> </div>
-                         {/* Row 3 */}
                          <div> <Label htmlFor="phone">Main Phone</Label> <Input id="phone" name="phone" value={formData.phone} onChange={handleInputChange} /> </div>
                          <div> <Label htmlFor="mobilePhone">Mobile Phone</Label> <Input id="mobilePhone" name="mobilePhone" value={formData.mobilePhone} onChange={handleInputChange} /> </div>
-                         {/* Row 4 */}
                           <div> <Label htmlFor="officePhone">Office Phone</Label> <Input id="officePhone" name="officePhone" value={formData.officePhone} onChange={handleInputChange} /> </div>
                           <div> <Label htmlFor="otherPhone">Other Phone</Label> <Input id="otherPhone" name="otherPhone" value={formData.otherPhone} onChange={handleInputChange} /> </div>
-                         {/* Row 5 */}
                          <div> <Label htmlFor="lead_status">Lead Status</Label> <Select id="lead_status" name="lead_status" value={formData.lead_status} onChange={handleInputChange}> {LEAD_STATUSES.map(status => (<option key={status} value={status}>{status}</option>))} </Select> </div>
-                         <div> <Label htmlFor="ownerId">Owner</Label> <Select id="ownerId" name="ownerId" value={formData.ownerId || ''} onChange={handleInputChange} disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""}> <option value="">Unassigned</option> {availableOwners.map(user => ( <option key={user.id} value={user.id}>{user.name} ({user.role})</option> ))} </Select> </div>
-                         {/* Row 6 */}
+                         <div> <Label htmlFor="ownerId">Owner</Label> <Select id="ownerId" name="ownerId" value={formData.ownerId || ''} onChange={handleInputChange} disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""}> <option value="">Unassigned</option> {(availableOwners || []).map(user => ( <option key={user.id} value={user.id}>{user.name} ({user.role})</option> ))} </Select> </div>
                          <div> <Label htmlFor="contactType">Contact Type</Label> <Select id="contactType" name="contactType" value={formData.contactType} onChange={handleInputChange}> {CONTACT_TYPES.map(type => (<option key={type} value={type}>{type}</option>))} </Select> </div>
                           <div className="md:col-span-2"> <Label htmlFor="businessAddress">Business Address</Label> <Input id="businessAddress" name="businessAddress" value={formData.businessAddress} onChange={handleInputChange} /> </div>
-                         {/* Row 7 */}
                          <div> <Label htmlFor="businessCity">Business City</Label> <Input id="businessCity" name="businessCity" value={formData.businessCity} onChange={handleInputChange} /> </div>
                          <div> <Label htmlFor="businessZip">Business Zip</Label> <Input id="businessZip" name="businessZip" value={formData.businessZip} onChange={handleInputChange} /> </div>
-                         {/* Row 8 */}
                          <div className="md:col-span-2"> <Label htmlFor="tags">Tags (comma-separated)</Label> <Input id="tags" name="tags" value={formData.tags} onChange={handleInputChange} placeholder="e.g., Lead, High Priority" /> </div>
                      </div>
 
-                     {/* Associated Deals Section */}
                      {editingContact && ( <div className="mt-6 pt-4 border-t"> <h3 className="text-lg font-medium mb-3">Associated Deals</h3> <div className="space-y-2 max-h-40 overflow-y-auto pr-1"> {associatedDeals.length === 0 ? ( <p className="text-sm text-gray-500">No associated deals.</p> ) : ( associatedDeals.map(deal => ( <div key={deal.id} className="text-sm p-2 border rounded-md bg-gray-50 flex justify-between items-center"> <button type="button" onClick={() => handleDealClick(deal.id)} className="text-blue-600 hover:underline focus:outline-none" title={`View details for deal: ${deal.name}`}> {deal.name} </button> <span className={`px-2 py-0.5 rounded text-xs font-medium ${getStatusBadgeColor(deal.stage, 'submission')}`}> {deal.stage} </span> </div> )) )} </div> </div> )}
-                     {/* Notes Section */}
-                     {editingContact && ( <div className="mt-6 pt-4 border-t"> <h3 className="text-lg font-medium mb-3">Notes</h3> <div className="space-y-3 mb-4 max-h-48 overflow-y-auto pr-1"> {(formData.notes || []).length === 0 && <p className="text-sm text-gray-500">No notes yet.</p>} {(formData.notes || []).slice().reverse().map(note => ( <div key={note.id} className="text-sm p-2 border rounded-md bg-gray-50"> <p className="whitespace-pre-wrap">{note.content}</p> <p className="text-xs text-gray-500 mt-1"> {note.author} - {formatTimestamp(note.timestamp)} </p> </div> ))} </div> <div> <Label htmlFor="newNote">Add a Note</Label> <Textarea id="newNote" name="newNote" rows="3" value={newNote} onChange={handleNoteChange} placeholder="Type your note here..." /> <Button type="button" variant="secondary" size="sm" className="mt-2" onClick={handleAddNote} disabled={!newNote.trim() || !canManage} title={!canManage ? "Admin or Owner role required" : ""}> Add Note </Button> </div> </div> )}
-                     {/* Modal Footer */}
-                     <div className="mt-6 flex justify-end space-x-3 border-t pt-4"> <Button type="button" variant="secondary" onClick={closeAddContactModal}>Cancel</Button> <Button type="submit" disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""}>{editingContact ? "Update Contact" : "Add Contact"}</Button> </div>
+                     {editingContact && ( 
+                        <div className="mt-6 pt-4 border-t"> 
+                            <h3 className="text-lg font-medium mb-3">Notes</h3> 
+                            {modalNotesError && <p className="text-red-500 text-sm mb-2">{modalNotesError}</p>}
+                            {modalNotesLoading ? <p className="text-sm text-gray-500">Loading notes...</p> : (
+                                <>
+                                    <div className="space-y-3 mb-4 max-h-48 overflow-y-auto pr-1"> 
+                                        {(formData.notes || []).length === 0 && <p className="text-sm text-gray-500">No notes yet.</p>} 
+                                        {(formData.notes || []).slice().reverse().map(note => ( 
+                                            <div key={note.id} className="text-sm p-2 border rounded-md bg-gray-50"> 
+                                                <p className="whitespace-pre-wrap">{note.content}</p> 
+                                                <p className="text-xs text-gray-500 mt-1"> {note.author || 'System'} - {formatTimestamp(note.timestamp)} </p> 
+                                            </div> 
+                                        ))} 
+                                    </div> 
+                                    <div> 
+                                        <Label htmlFor="newNote">Add a Note</Label> 
+                                        <Textarea id="newNote" name="newNote" rows="3" value={newNote} onChange={handleNoteChange} placeholder="Type your note here..." /> 
+                                        <Button 
+                                            type="button" variant="secondary" size="sm" className="mt-2" 
+                                            onClick={handleAddNote} 
+                                            disabled={!newNote.trim() || !canManage || noteSubmissionLoading} 
+                                            title={!canManage ? "Admin or Owner role required" : ""}
+                                        > 
+                                            {noteSubmissionLoading ? "Adding..." : "Add Note"}
+                                        </Button> 
+                                    </div>
+                                </>
+                            )}
+                        </div> 
+                    )}
+                     <div className="mt-6 flex justify-end space-x-3 border-t pt-4"> 
+                        <Button type="button" variant="secondary" onClick={closeAddContactModal} disabled={modalIsLoading}>Cancel</Button> 
+                        <Button type="submit" disabled={!canManage || modalIsLoading} title={!canManage ? "Admin or Owner role required" : ""}>
+                            {modalIsLoading ? 'Saving...' : (editingContact ? "Update Contact" : "Add Contact")}
+                        </Button> 
+                    </div>
                  </form>
              </Modal>
 
-             {/* Import Leads Modal */}
              <ImportLeadsModal
                 isOpen={isImportModalOpen}
                 onClose={closeImportModal}
@@ -742,6 +884,7 @@ const DealDetailModal = React.memo(({ isOpen, onClose, deal, availableContacts, 
     const [newSubmissionData, setNewSubmissionData] = useState({ lender_name: '', submission_date: '' });
     const [isEditing, setIsEditing] = useState(false);
     const [editFormData, setEditFormData] = useState({});
+    const { allUsers } = App.useSharedState ? App.useSharedState() : { allUsers: mockUsers }; // Access allUsers for DealDetailModal too
 
     // Updated useEffect dependency array
     useEffect(() => {
@@ -761,7 +904,7 @@ const DealDetailModal = React.memo(({ isOpen, onClose, deal, availableContacts, 
 
     if (!isOpen || !deal) return null;
 
-    const ownerName = getOwnerName(deal.ownerId, mockUsers);
+    const ownerName = getOwnerName(deal.ownerId, allUsers); 
     const handleContactClick = (contactId) => { console.log("Navigate to or open modal for contact ID:", contactId); alert(`Simulating opening contact details for ID: ${contactId}\n(Actual navigation/modal opening requires more complex state management)`); };
     const handleNoteChange = (e) => { setNewNote(e.target.value); };
     const handleAddNoteClick = () => { if (!newNote.trim()) return; onAddNote(deal.id, newNote); setNewNote(''); };
@@ -788,7 +931,7 @@ const DealDetailModal = React.memo(({ isOpen, onClose, deal, availableContacts, 
                 {/* Display/Edit Deal Details */}
                 <div>
                     <div className="flex justify-between items-center mb-3"> <h3 className="text-lg font-medium text-gray-800">Deal Details</h3> {!isEditing && canManage && ( <Button variant="outline" size="sm" onClick={() => setIsEditing(true)}> <EditIcon className="mr-1 h-4 w-4" /> Edit </Button> )} </div>
-                    {isEditing ? ( /* EDIT MODE FORM */ <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm p-4 border rounded-md bg-gray-50"> <div> <Label htmlFor="editDealName">Deal Name</Label> <Input id="editDealName" name="name" value={editFormData.name || ''} onChange={handleEditInputChange} required /> </div> <div> <Label htmlFor="editDealValue">Value ($)</Label> <Input id="editDealValue" name="value" type="number" step="0.01" value={editFormData.value || ''} onChange={handleEditInputChange} required /> </div> <div> <Label htmlFor="editDealStage">Stage</Label> <Select id="editDealStage" name="stage" value={editFormData.stage || ''} onChange={handleEditInputChange}> {DEAL_STAGES.map(stage => (<option key={stage} value={stage}>{stage}</option>))} </Select> </div> <div> <Label htmlFor="editDealOwner">Owner</Label> <Select id="editDealOwner" name="ownerId" value={editFormData.ownerId || ''} onChange={handleEditInputChange} disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""}> <option value="">Unassigned</option> {mockUsers.filter(u=>u.role !== 'Rep').map(user => ( <option key={user.id} value={user.id}>{user.name} ({user.role})</option> ))} </Select> </div> <div> <Label htmlFor="editCloseDate">Expected Close Date</Label> <Input id="editCloseDate" name="expectedCloseDate" type="date" value={editFormData.expectedCloseDate || ''} onChange={handleEditInputChange} /> </div> <div> <Label htmlFor="editDealType">Deal Type</Label> <Select id="editDealType" name="dealType" value={editFormData.dealType || ''} onChange={handleEditInputChange}> {DEAL_TYPES.map(type => (<option key={type} value={type}>{type}</option>))} </Select> </div> <div> <Label htmlFor="editPriority">Priority</Label> <Select id="editPriority" name="priority" value={editFormData.priority || ''} onChange={handleEditInputChange}> {DEAL_PRIORITIES.map(p => (<option key={p} value={p}>{p}</option>))} </Select> </div> <div className="sm:col-span-2"> <Label htmlFor="editNextStep">Next Step</Label> <Textarea id="editNextStep" name="nextStep" rows={2} value={editFormData.nextStep || ''} onChange={handleEditInputChange} /> </div> </div>
+                    {isEditing ? ( /* EDIT MODE FORM */ <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm p-4 border rounded-md bg-gray-50"> <div> <Label htmlFor="editDealName">Deal Name</Label> <Input id="editDealName" name="name" value={editFormData.name || ''} onChange={handleEditInputChange} required /> </div> <div> <Label htmlFor="editDealValue">Value ($)</Label> <Input id="editDealValue" name="value" type="number" step="0.01" value={editFormData.value || ''} onChange={handleEditInputChange} required /> </div> <div> <Label htmlFor="editDealStage">Stage</Label> <Select id="editDealStage" name="stage" value={editFormData.stage || ''} onChange={handleEditInputChange}> {DEAL_STAGES.map(stage => (<option key={stage} value={stage}>{stage}</option>))} </Select> </div> <div> <Label htmlFor="editDealOwner">Owner</Label> <Select id="editDealOwner" name="ownerId" value={editFormData.ownerId || ''} onChange={handleEditInputChange} disabled={!canManage} title={!canManage ? "Admin or Owner role required" : ""}> <option value="">Unassigned</option> {(allUsers || mockUsers).filter(u=>u.role !== 'Rep').map(user => ( <option key={user.id} value={user.id}>{user.name} ({user.role})</option> ))} </Select> </div> <div> <Label htmlFor="editCloseDate">Expected Close Date</Label> <Input id="editCloseDate" name="expectedCloseDate" type="date" value={editFormData.expectedCloseDate || ''} onChange={handleEditInputChange} /> </div> <div> <Label htmlFor="editDealType">Deal Type</Label> <Select id="editDealType" name="dealType" value={editFormData.dealType || ''} onChange={handleEditInputChange}> {DEAL_TYPES.map(type => (<option key={type} value={type}>{type}</option>))} </Select> </div> <div> <Label htmlFor="editPriority">Priority</Label> <Select id="editPriority" name="priority" value={editFormData.priority || ''} onChange={handleEditInputChange}> {DEAL_PRIORITIES.map(p => (<option key={p} value={p}>{p}</option>))} </Select> </div> <div className="sm:col-span-2"> <Label htmlFor="editNextStep">Next Step</Label> <Textarea id="editNextStep" name="nextStep" rows={2} value={editFormData.nextStep || ''} onChange={handleEditInputChange} /> </div> </div>
                     ) : ( /* DISPLAY MODE */ <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm p-4 border rounded-md bg-gray-50"> <div> <Label className="text-gray-500 font-medium">Deal Name</Label> <p>{deal.name}</p> </div> <div> <Label className="text-gray-500 font-medium">Value</Label> <p>${deal.value.toLocaleString()}</p> </div> <div> <Label className="text-gray-500 font-medium">Stage</Label> <p>{deal.stage}</p> </div> <div> <Label className="text-gray-500 font-medium">Associated Contacts</Label> {(deal.contactIds || []).length > 0 ? ( <div className="flex flex-wrap gap-x-2"> {(deal.contactIds).map((contactId, index) => { const contact = availableContacts.find(c => c.id === contactId); return ( <button key={contactId} onClick={() => handleContactClick(contactId)} className="text-blue-600 hover:underline focus:outline-none" title={`View details for ${contact ? `${contact.firstName} ${contact.lastName}` : 'Unknown'}`}> {contact ? `${contact.firstName} ${contact.lastName}` : <span className="text-red-500 italic">Unknown</span>} {index < deal.contactIds.length - 1 ? ',' : ''} </button> ); })} </div> ) : ( <p className="italic text-gray-500">N/A</p> )} </div> <div> <Label className="text-gray-500 font-medium">Owner</Label> <p>{ownerName}</p> </div> <div> <Label className="text-gray-500 font-medium">Expected Close Date</Label> <p>{deal.expectedCloseDate || 'N/A'}</p> </div> <div> <Label className="text-gray-500 font-medium">Deal Type</Label> <p>{deal.dealType || 'N/A'}</p> </div> <div> <Label className="text-gray-500 font-medium">Priority</Label> <p>{deal.priority || 'N/A'}</p> </div> <div className="sm:col-span-2"> <Label className="text-gray-500 font-medium">Next Step</Label> <p>{deal.nextStep || 'N/A'}</p> </div> </div> )}
                 </div>
 
@@ -1356,10 +1499,10 @@ function App() {
   const [currentUser, setCurrentUser] = useState(mockUsers.find(u => u.role === 'Owner') || { name: 'Owner User', email: 'owner@example.com', role: 'Owner' });
 
   // Lifted state for shared data
-  const [contacts, setContacts] = useState(initialContacts);
+  const [contacts, setContacts] = useState([]); // Initialize as empty, will be fetched by ContactsPage
   const [deals, setDeals] = useState(initialDeals);
   const [tasks, setTasks] = useState(initialTasks);
-  const [users, setUsers] = useState(mockUsers); // Added users state initialized with updated mockUsers
+  const [users, setUsers] = useState(mockUsers); // UsersPage will fetch, but good to have mock for fallback/initial
 
   // --- Handlers passed down to DealsPage ---
   const handleAddDealNote = useCallback((dealId, noteContent) => { /* ... (same as before, uses setDeals) ... */ const noteToAdd = { id: `dn${Date.now()}`, content: noteContent, timestamp: new Date().toISOString(), author: 'You' }; setDeals(prevDeals => { const updatedDeals = { ...prevDeals }; for (const stage in updatedDeals) { const dealIndex = updatedDeals[stage].findIndex(d => d.id === dealId); if (dealIndex !== -1) { const currentNotes = updatedDeals[stage][dealIndex].notes || []; const updatedDeal = { ...updatedDeals[stage][dealIndex], notes: [...currentNotes, noteToAdd] }; const updatedStageDeals = [...updatedDeals[stage]]; updatedStageDeals[dealIndex] = updatedDeal; updatedDeals[stage] = updatedStageDeals; break; } } return updatedDeals; }); }, [setDeals]);
@@ -1429,7 +1572,7 @@ function App() {
   return (
     <DashboardLayout currentPage={currentPage} navigate={navigate} currentUser={currentUser} onRoleChange={handleRoleChange}>
         {currentPage === 'dashboard' && <DashboardPage contacts={contacts} deals={deals} tasks={tasks} />}
-        {currentPage === 'contacts' && <ContactsPage userRole={currentUser.role} contacts={contacts} setContacts={setContacts} allDealsFlat={allDealsFlat} />}
+        {currentPage === 'contacts' && <ContactsPage userRole={currentUser.role} contacts={contacts} setContacts={setContacts} allDealsFlat={allDealsFlat} allUsers={users} />}
         {currentPage === 'deals' && (
             <DealsPage
                 userRole={currentUser.role}
@@ -1444,9 +1587,11 @@ function App() {
             />
         )}
         {currentPage === 'tasks' && <TasksPage userRole={currentUser.role} tasks={tasks} setTasks={setTasks} />}
-        {currentPage === 'users' && <UsersPage userRole={currentUser.role} users={users} setUsers={setUsers} />} {/* Added UsersPage rendering */}
+        {currentPage === 'users' && <UsersPage userRole={currentUser.role} users={users} setUsers={setUsers} />} 
     </DashboardLayout>
   );
 }
 
 export default App;
+
+[end of frontend/src/components/CrmApp.jsx]
